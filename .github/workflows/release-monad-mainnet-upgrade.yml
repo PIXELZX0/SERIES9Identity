@@ -1,0 +1,488 @@
+name: Release Monad Mainnet Upgrade
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monad-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-and-generate-safe-tx:
+    name: Deploy Upgrade + Safe Tx JSON
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MONAD_RPC_URL: ${{ secrets.MONAD_RPC_URL }}
+      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      IDENTITY_PROXY: ${{ secrets.IDENTITY_PROXY }}
+      IDENTITY_UPGRADE_DATA: ${{ secrets.IDENTITY_UPGRADE_DATA }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # lib/series9 (PIXELZX0/SERIES9) is a private submodule; the default
+          # GITHUB_TOKEN cannot read it, so a PAT with repo scope is required.
+          submodules: true
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${MONAD_RPC_URL:?GitHub secret MONAD_RPC_URL is required}"
+          : "${PRIVATE_KEY:?GitHub secret PRIVATE_KEY is required}"
+          : "${IDENTITY_PROXY:?GitHub secret IDENTITY_PROXY is required}"
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Show Foundry version
+        run: forge --version
+
+      - name: Build contracts
+        env:
+          FOUNDRY_PROFILE: deploy
+        run: forge build
+
+      - name: Generate ABI JSON files
+        id: abi
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REF_SLUG="$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+          REF_SLUG="${REF_SLUG##-}"
+          REF_SLUG="${REF_SLUG%%-}"
+          if [[ -z "$REF_SLUG" ]]; then
+            REF_SLUG="run-${GITHUB_RUN_ID}"
+          fi
+
+          ABI_DIR="release-abis-${REF_SLUG}"
+          mkdir -p "$ABI_DIR"
+
+          jq '.abi' out/Series9Identity.sol/Series9Identity.json > "$ABI_DIR/Series9Identity.abi.json"
+          jq '.abi' out/Series9IdentityWallet.sol/Series9IdentityWallet.json > "$ABI_DIR/Series9IdentityWallet.abi.json"
+          jq '.abi' out/Series9IdentityWalletV2.sol/Series9IdentityWalletV2.json > "$ABI_DIR/Series9IdentityWalletV2.abi.json"
+
+          echo "abi_dir=$ABI_DIR" >> "$GITHUB_OUTPUT"
+          echo "ref_slug=$REF_SLUG" >> "$GITHUB_OUTPUT"
+
+      - name: Detect contracts requiring upgrade
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # EIP-1967 implementation slot
+          IMPL_SLOT=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+
+          normalize_bytecode() {
+            local raw="$1"
+            printf '%s' "${raw#0x}" | tr 'A-F' 'a-f'
+          }
+
+          read_impl_address() {
+            local proxy="$1"
+            local raw
+            raw="$(cast storage "$proxy" "$IMPL_SLOT" --rpc-url "$MONAD_RPC_URL")"
+            # bytes32 -> address: take last 20 bytes (40 hex chars), drop "0x" + 24 leading-zero hex chars
+            printf '0x%s' "${raw:26}"
+          }
+
+          bytecode_matches() {
+            local impl="$1"
+            local artifact="$2"
+            local onchain local_bc
+            onchain="$(cast code "$impl" --rpc-url "$MONAD_RPC_URL")"
+            local_bc="$(jq -r '.deployedBytecode.object' "$artifact")"
+            [[ "$(normalize_bytecode "$onchain")" == "$(normalize_bytecode "$local_bc")" ]]
+          }
+
+          decide_deploy() {
+            local impl="$1"
+            local artifact="$2"
+            if [[ -z "$impl" || "$impl" == "0x" || "$impl" == "0x0000000000000000000000000000000000000000" ]]; then
+              echo true
+              return
+            fi
+            if bytecode_matches "$impl" "$artifact"; then
+              echo false
+            else
+              echo true
+            fi
+          }
+
+          IDENTITY_CURRENT_IMPL="$(read_impl_address "$IDENTITY_PROXY")"
+          DEPLOY_IDENTITY="$(decide_deploy "$IDENTITY_CURRENT_IMPL" out/Series9Identity.sol/Series9Identity.json)"
+
+          # Wallet factory bootstrap detection.
+          # The pre-wallet Identity impl has no walletImplementation() getter, so the call reverts -> uninitialized.
+          # A new impl that has never been bootstrapped returns the zero address -> also uninitialized.
+          # Only a valid non-zero address means the factory is already live.
+          DEPLOY_WALLET=false
+          WALLET_FACTORY_INITIALIZED=false
+          WALLET_CURRENT_IMPL=""
+          if WALLET_CURRENT_IMPL="$(cast call "$IDENTITY_PROXY" "walletImplementation()(address)" --rpc-url "$MONAD_RPC_URL" 2>/dev/null)"; then
+            WALLET_CURRENT_IMPL="$(printf '%s' "$WALLET_CURRENT_IMPL" | tr 'A-F' 'a-f')"
+          else
+            WALLET_CURRENT_IMPL=""
+          fi
+          if [[ "$WALLET_CURRENT_IMPL" =~ ^0x[0-9a-f]{40}$ && "$WALLET_CURRENT_IMPL" != "0x0000000000000000000000000000000000000000" ]]; then
+            WALLET_FACTORY_INITIALIZED=true
+          else
+            # First-time rollout: deploy the bootstrap wallet impl and queue initializeWalletFactory.
+            DEPLOY_WALLET=true
+          fi
+
+          {
+            echo "deploy_identity=$DEPLOY_IDENTITY"
+            echo "deploy_wallet=$DEPLOY_WALLET"
+            echo "wallet_factory_initialized=$WALLET_FACTORY_INITIALIZED"
+            echo "identity_current_impl=$IDENTITY_CURRENT_IMPL"
+            echo "wallet_current_impl=$WALLET_CURRENT_IMPL"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Contract change detection"
+            echo "- Identity: deploy=\`$DEPLOY_IDENTITY\` (current=\`$IDENTITY_CURRENT_IMPL\`)"
+            if [[ "$WALLET_FACTORY_INITIALIZED" == "true" ]]; then
+              echo "- Wallet factory: already initialized (bootstrap=\`$WALLET_CURRENT_IMPL\`); logic upgrades need manual setWalletImplApproved."
+            else
+              echo "- Wallet factory: deploy=\`$DEPLOY_WALLET\` (first-time bootstrap via initializeWalletFactory)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy implementations and generate Safe Transaction Builder JSON
+        id: deploy
+        env:
+          FOUNDRY_PROFILE: deploy
+          SKIP_VERIFY_INPUT: ${{ vars.SKIP_VERIFY }}
+          SOURCIFY_VERIFIER_URL: https://sourcify-api-monad.blockvision.org
+          SOCIALSCAN_VERIFIER_URL: https://api.socialscan.io/monad/v1/explorer/command_api/contract
+          DEPLOY_IDENTITY: ${{ steps.detect.outputs.deploy_identity }}
+          DEPLOY_WALLET: ${{ steps.detect.outputs.deploy_wallet }}
+          WALLET_FACTORY_INITIALIZED: ${{ steps.detect.outputs.wallet_factory_initialized }}
+        run: |
+          set -euo pipefail
+
+          # Verify on Sourcify by default.
+          # Set repository variable SKIP_VERIFY=true only when you explicitly want to skip verification.
+          if [[ -n "${SKIP_VERIFY_INPUT:-}" ]]; then
+            case "${SKIP_VERIFY_INPUT,,}" in
+              true|false)
+                export SKIP_VERIFY="${SKIP_VERIFY_INPUT,,}"
+                ;;
+              *)
+                echo "Invalid SKIP_VERIFY value: ${SKIP_VERIFY_INPUT}. Use true or false." >&2
+                exit 1
+                ;;
+            esac
+          else
+            export SKIP_VERIFY="false"
+          fi
+
+          IDENTITY_DATA="${IDENTITY_UPGRADE_DATA:-}"
+          if [[ -z "$IDENTITY_DATA" ]]; then IDENTITY_DATA="0x"; fi
+
+          REF_SLUG="$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+          REF_SLUG="${REF_SLUG##-}"
+          REF_SLUG="${REF_SLUG%%-}"
+          if [[ -z "$REF_SLUG" ]]; then
+            REF_SLUG="run-${GITHUB_RUN_ID}"
+          fi
+
+          IDENTITY_IMPL=""
+          IDENTITY_TX_HASH=""
+          WALLET_IMPL=""
+          WALLET_TX_HASH=""
+
+          parse_deploy_address() {
+            local label="$1"
+            local json="$2"
+            local addr
+            addr="$(echo "$json" | jq -r '.deployedTo')"
+            if [[ -z "$addr" || "$addr" == "null" ]]; then
+              echo "Failed to parse deployed $label implementation address" >&2
+              exit 1
+            fi
+            echo "$addr"
+          }
+
+          if [[ "$DEPLOY_IDENTITY" == "true" ]]; then
+            echo "Deploying Identity implementation..."
+            IDENTITY_DEPLOY_JSON="$(forge create src/Series9Identity.sol:Series9Identity \
+              --rpc-url "$MONAD_RPC_URL" \
+              --broadcast \
+              --private-key "$PRIVATE_KEY" \
+              --json)"
+            IDENTITY_IMPL="$(parse_deploy_address Identity "$IDENTITY_DEPLOY_JSON")"
+            IDENTITY_TX_HASH="$(echo "$IDENTITY_DEPLOY_JSON" | jq -r '.transactionHash')"
+          else
+            echo "Identity implementation matches on-chain bytecode; skipping deploy."
+          fi
+
+          if [[ "$DEPLOY_WALLET" == "true" ]]; then
+            echo "Deploying Series9IdentityWallet bootstrap implementation..."
+            WALLET_DEPLOY_JSON="$(forge create src/Series9IdentityWallet.sol:Series9IdentityWallet \
+              --rpc-url "$MONAD_RPC_URL" \
+              --private-key "$PRIVATE_KEY" \
+              --broadcast \
+              --json)"
+            WALLET_IMPL="$(parse_deploy_address Wallet "$WALLET_DEPLOY_JSON")"
+            WALLET_TX_HASH="$(echo "$WALLET_DEPLOY_JSON" | jq -r '.transactionHash')"
+          else
+            echo "Wallet factory already initialized; skipping wallet implementation deploy (logic upgrades are manual via setWalletImplApproved)."
+          fi
+
+          VERIFICATION_STATUS="skipped"
+          VERIFICATION_FAILURES=""
+
+          add_failure() {
+            local failure="$1"
+            if [[ -n "$VERIFICATION_FAILURES" ]]; then
+              VERIFICATION_FAILURES="${VERIFICATION_FAILURES},${failure}"
+            else
+              VERIFICATION_FAILURES="$failure"
+            fi
+          }
+
+          verify_contract_sourcify() {
+            local contract_address="$1"
+            local contract_name="$2"
+            local contract_label="$3"
+
+            echo "  -> Verifying ${contract_label} on Sourcify (Blockvision)..."
+            if forge verify-contract "$contract_address" "$contract_name" \
+              --chain 143 \
+              --rpc-url "$MONAD_RPC_URL" \
+              --verifier sourcify \
+              --verifier-url "$SOURCIFY_VERIFIER_URL"; then
+              echo "  -> Sourcify verification succeeded for ${contract_label}."
+            else
+              echo "::warning title=Sourcify verification failed::${contract_label} verification failed on Sourcify."
+              add_failure "Sourcify:${contract_label}"
+            fi
+          }
+
+          verify_contract_socialscan() {
+            local contract_address="$1"
+            local contract_name="$2"
+            local contract_label="$3"
+
+            echo "  -> Verifying ${contract_label} on SocialScan (Blockscout)..."
+            if forge verify-contract "$contract_address" "$contract_name" \
+              --chain 143 \
+              --rpc-url "$MONAD_RPC_URL" \
+              --verifier blockscout \
+              --verifier-url "$SOCIALSCAN_VERIFIER_URL"; then
+              echo "  -> SocialScan verification succeeded for ${contract_label}."
+            else
+              echo "::warning title=SocialScan verification failed::${contract_label} verification failed on SocialScan."
+              add_failure "SocialScan:${contract_label}"
+            fi
+          }
+
+          verify_contract_dual() {
+            local contract_address="$1"
+            local contract_name="$2"
+            local contract_label="$3"
+            echo "Verifying ${contract_label} on both Sourcify and SocialScan..."
+            verify_contract_sourcify "$contract_address" "$contract_name" "$contract_label"
+            verify_contract_socialscan "$contract_address" "$contract_name" "$contract_label"
+          }
+
+          if [[ "$SKIP_VERIFY" == "false" ]]; then
+            VERIFIED_ANY=false
+            if [[ -n "$IDENTITY_IMPL" ]]; then
+              VERIFIED_ANY=true
+              verify_contract_dual "$IDENTITY_IMPL" src/Series9Identity.sol:Series9Identity "Series9Identity"
+            fi
+            if [[ -n "$WALLET_IMPL" ]]; then
+              VERIFIED_ANY=true
+              verify_contract_dual "$WALLET_IMPL" src/Series9IdentityWallet.sol:Series9IdentityWallet "Series9IdentityWallet"
+            fi
+
+            if [[ "$VERIFIED_ANY" == "true" ]]; then
+              if [[ -n "$VERIFICATION_FAILURES" ]]; then
+                VERIFICATION_STATUS="partial_failure"
+              else
+                VERIFICATION_STATUS="success"
+              fi
+            else
+              VERIFICATION_STATUS="not_required"
+            fi
+          else
+            echo "Skipping verification (SKIP_VERIFY=true)."
+          fi
+
+          TX_ARRAY="[]"
+          DESCRIPTION_PARTS=""
+
+          append_description() {
+            if [[ -n "$DESCRIPTION_PARTS" ]]; then
+              DESCRIPTION_PARTS="${DESCRIPTION_PARTS}, $1"
+            else
+              DESCRIPTION_PARTS="$1"
+            fi
+          }
+
+          if [[ -n "$IDENTITY_IMPL" ]]; then
+            IDENTITY_UPGRADE_CALLDATA="$(cast calldata \
+              "upgradeToAndCall(address,bytes)" \
+              "$IDENTITY_IMPL" \
+              "$IDENTITY_DATA")"
+            TX_ARRAY="$(echo "$TX_ARRAY" | jq \
+              --arg to "$IDENTITY_PROXY" \
+              --arg data "$IDENTITY_UPGRADE_CALLDATA" \
+              '. + [{"to": $to, "value": "0", "data": $data}]')"
+            append_description "Identity"
+          fi
+
+          # Wallet factory bootstrap MUST be ordered after the Identity upgrade tx above: initializeWalletFactory
+          # is reinitializer(3) on the NEW impl, so the proxy must already point at it. It also calls
+          # _requirePaymentInitialized(), so the payment reinitializer(2) must have run (in a prior release, or in
+          # this same batch via IDENTITY_UPGRADE_DATA) or this tx reverts when the Safe executes it.
+          if [[ -n "$WALLET_IMPL" ]]; then
+            WALLET_INIT_CALLDATA="$(cast calldata \
+              "initializeWalletFactory(address)" \
+              "$WALLET_IMPL")"
+            TX_ARRAY="$(echo "$TX_ARRAY" | jq \
+              --arg to "$IDENTITY_PROXY" \
+              --arg data "$WALLET_INIT_CALLDATA" \
+              '. + [{"to": $to, "value": "0", "data": $data}]')"
+            append_description "Wallet factory"
+          fi
+
+          TX_COUNT="$(echo "$TX_ARRAY" | jq 'length')"
+          DESCRIPTION="No contract changes detected."
+          if [[ "$TX_COUNT" != "0" ]]; then
+            DESCRIPTION="Upgrade ${DESCRIPTION_PARTS}."
+          fi
+
+          SAFE_JSON_OUT="safe-tx-upgrade-${REF_SLUG}.json"
+          jq -n \
+            --arg chainId "143" \
+            --arg description "$DESCRIPTION" \
+            --argjson transactions "$TX_ARRAY" \
+            '{
+              "version": "1.0",
+              "chainId": $chainId,
+              "meta": {
+                "name": "Series9Identity Upgrade",
+                "description": $description
+              },
+              "transactions": $transactions
+            }' > "$SAFE_JSON_OUT"
+
+          jq -e --argjson expected "$TX_COUNT" '.transactions | length == $expected' "$SAFE_JSON_OUT" >/dev/null
+
+          RUN_FILE="release-deploy-${REF_SLUG}.json"
+          jq -n \
+            --arg chainId "143" \
+            --arg identityProxy "$IDENTITY_PROXY" \
+            --arg identityImpl "$IDENTITY_IMPL" \
+            --arg walletImpl "$WALLET_IMPL" \
+            --arg identityTxHash "$IDENTITY_TX_HASH" \
+            --arg walletTxHash "$WALLET_TX_HASH" \
+            --arg deployIdentity "$DEPLOY_IDENTITY" \
+            --arg deployWallet "$DEPLOY_WALLET" \
+            --arg walletFactoryInitialized "$WALLET_FACTORY_INITIALIZED" \
+            --arg safeJson "$SAFE_JSON_OUT" \
+            --arg skipVerify "$SKIP_VERIFY" \
+            --arg verificationStatus "$VERIFICATION_STATUS" \
+            --arg verificationFailures "$VERIFICATION_FAILURES" \
+            --argjson txCount "$TX_COUNT" \
+            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              "identity": {
+                "address": $identityImpl,
+                "txHash": $identityTxHash,
+                "deployed": ($deployIdentity == "true")
+              },
+              "wallet": {
+                "address": $walletImpl,
+                "txHash": $walletTxHash,
+                "deployed": ($deployWallet == "true"),
+                "factoryAlreadyInitialized": ($walletFactoryInitialized == "true")
+              }
+            } as $implementations
+            | {
+              "chainId": $chainId,
+              "identityProxy": $identityProxy,
+              "implementations": $implementations,
+              "safeTxJson": $safeJson,
+              "txCount": $txCount,
+              "skipVerify": $skipVerify,
+              "verificationStatus": $verificationStatus,
+              "verificationFailures": $verificationFailures,
+              "verifier": {
+                "provider": "Sourcify",
+                "url": "https://sourcify-api-monad.blockvision.org"
+              },
+              "generatedAt": $generatedAt
+            }' > "$RUN_FILE"
+
+          echo "run_file=$RUN_FILE" >> "$GITHUB_OUTPUT"
+          echo "safe_json=$SAFE_JSON_OUT" >> "$GITHUB_OUTPUT"
+          echo "identity_impl=$IDENTITY_IMPL" >> "$GITHUB_OUTPUT"
+          echo "wallet_impl=$WALLET_IMPL" >> "$GITHUB_OUTPUT"
+          echo "tx_count=$TX_COUNT" >> "$GITHUB_OUTPUT"
+          echo "verification_status=$VERIFICATION_STATUS" >> "$GITHUB_OUTPUT"
+          echo "verification_failures=$VERIFICATION_FAILURES" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: monad-release-${{ steps.abi.outputs.ref_slug }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.deploy.outputs.safe_json }}
+            ${{ steps.deploy.outputs.run_file }}
+            ${{ steps.abi.outputs.abi_dir }}
+
+      - name: Attach artifacts to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.deploy.outputs.safe_json }}
+            ${{ steps.deploy.outputs.run_file }}
+            ${{ steps.abi.outputs.abi_dir }}/*.json
+
+      - name: Write job summary
+        run: |
+          {
+            echo "## Monad Mainnet release deployment"
+            echo ""
+            echo "- Release: \`${{ github.ref_name }}\`"
+            echo "- Identity Proxy: \`${IDENTITY_PROXY}\`"
+            if [[ "${{ steps.detect.outputs.deploy_identity }}" == "true" ]]; then
+              echo "- New Identity implementation: \`${{ steps.deploy.outputs.identity_impl }}\`"
+            else
+              echo "- Identity implementation unchanged (current: \`${{ steps.detect.outputs.identity_current_impl }}\`)"
+            fi
+            if [[ "${{ steps.detect.outputs.deploy_wallet }}" == "true" ]]; then
+              echo "- New Wallet bootstrap implementation: \`${{ steps.deploy.outputs.wallet_impl }}\` (initializeWalletFactory queued in Safe batch)"
+            elif [[ "${{ steps.detect.outputs.wallet_factory_initialized }}" == "true" ]]; then
+              echo "- Wallet factory already initialized (bootstrap: \`${{ steps.detect.outputs.wallet_current_impl }}\`); logic upgrades are manual via setWalletImplApproved"
+            fi
+            echo "- Safe transactions queued: \`${{ steps.deploy.outputs.tx_count }}\`"
+            echo "- Verification provider: \`Sourcify\`"
+            echo "- Verification URL: \`https://sourcify-api-monad.blockvision.org\`"
+            echo "- Verification status: \`${{ steps.deploy.outputs.verification_status }}\`"
+            if [[ -n "${{ steps.deploy.outputs.verification_failures }}" ]]; then
+              echo "- Verification failures: \`${{ steps.deploy.outputs.verification_failures }}\`"
+            fi
+            echo "- Safe Transaction Builder JSON: \`${{ steps.deploy.outputs.safe_json }}\`"
+            echo "- ABI JSON directory: \`${{ steps.abi.outputs.abi_dir }}\`"
+            echo "- Safe import URL: https://app.safe.global/transactions/tx-builder"
+          } >> "$GITHUB_STEP_SUMMARY"
