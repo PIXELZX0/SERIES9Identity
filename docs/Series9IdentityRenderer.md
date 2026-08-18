@@ -1,182 +1,143 @@
 # Series9IdentityRenderer
 
-| 항목 | 값 |
-|------|----|
-| 파일 | [`src/Series9IdentityRenderer.sol`](../src/Series9IdentityRenderer.sol) |
-| 라인 수 | 1,150 |
-| 상속 | 없음 |
-| 배포 형태 | **독립 배포 없음**. `Series9Identity`가 base contract로 상속 |
-| 모든 함수 | `internal pure` (외부 노출 0개) |
+| Item | Value |
+|------|-------|
+| File | [`src/Series9IdentityRenderer.sol`](../src/Series9IdentityRenderer.sol) |
+| Inheritance | None |
+| Deployment | Not deployed separately; `Series9Identity` inherits it |
+| State | Stateless; all renderer functions are `internal pure` |
 
-## 개요
+## Overview
 
-`Series9IdentityRenderer`는 `Series9Identity`의 `tokenURI(tokenId)` 호출에 응답하기 위한
-**상태 없는 온체인 메타데이터 생성기**입니다.
-프로필 데이터(이름/바이오/색상/엔티티 타입 등)와 `AvatarConfig`를 받아
-SVG 이미지 + JSON 메타데이터를 합쳐 base64로 인코딩한 `data:` URI를 반환합니다.
+`Series9IdentityRenderer` creates the `tokenURI(tokenId)` response used by
+`Series9Identity`. It builds a static premium identity card, embeds the SVG as
+`data:image/svg+xml;base64,...`, then wraps the JSON in
+`data:application/json;base64,...`.
 
-외부 의존성/스토리지가 없어 가스 비용은 입력 길이에만 비례합니다.
+The active renderer does not read `AvatarConfig`, hue, or saturation. The
+legacy `AvatarConfig` struct remains only because the upgradeable identity
+contract must preserve the historical `avatarConfig` mapping and setter ABI.
 
-## 핵심 데이터 구조
+## Entry Point
 
 ```solidity
-struct AvatarConfig {
-    uint8 skinTone;   // 0..7
-    uint8 hairStyle;  // 0..7
-    uint8 hairColor;  // 0..7
-    uint8 eyes;       // 0..7
-    uint8 mouth;      // 0..7
-    uint8 outfit;     // 0..7
-    uint8 accessory;  // 0..7
-    uint8 background; // 0..7
-}
-
-struct RenderProfile {
-    string name; string bio;
-    uint8 entityType;  // 0 = Human, 1 = AI
-    uint8 hue; uint8 saturation;
-    bool verified; uint64 registeredAt;
-    uint256 reputationScore;
-    string handle;
-    AvatarConfig avatar;
-}
+_renderTokenURI(
+    tokenId,
+    name,
+    bio,
+    entityType,
+    verified,
+    registeredAt,
+    reputationScore,
+    handle,
+    imageUrl
+)
 ```
 
-## 진입점
+`Series9Identity.tokenURI` passes the profile fields, the effective reputation,
+the payment handle, and `imageUrls[tokenId]`.
 
-### `_renderTokenURI(tokenId, name, bio, entityType, hue, saturation, verified, registeredAt, reputationScore, handle, avatar) -> string`
+The renderer creates two image modes:
 
-`Series9Identity.tokenURI(tokenId)`가 직접 호출하는 함수.
+- A clipped, framed external `<image href="...">` when `imageUrl` is set.
+- A geometric `S9` identity mark when it is empty.
 
-처리 흐름:
-1. 입력값을 `RenderProfile`로 묶음
-2. `_generateSVG(tokenId, p)`로 SVG 문자열 생성
-3. JSON 속성(`attributes` 배열)을 구성: 기본 6개 + 아바타 8개
-4. 전체 JSON을 base64 인코딩하여 `data:application/json;base64,...` 형태로 반환
+All user-controlled values used in SVG are XML escaped. JSON string values are
+JSON escaped before the outer metadata is encoded.
 
-### `_generateSVG(tokenId, p) -> string`
-1. `hue` / `saturation`을 기반으로 primary/dark/light/accent 색 4종 산출
-2. `_svgHead` — `<defs>`, gradient, clipPath 정의
-3. `_entityBadge`, `_verifiedBadge` — 우상단 배지
-4. `_renderCharacter` — 배경/몸/옷/얼굴/머리/액세서리 합성
-5. `_svgBody` — 좌측 텍스트 영역(name/handle/bio 2줄), 하단 푸터, 토큰 ID 표시
+## Metadata
 
-## 함수 목록 (전부 `internal pure`)
-
-### Rendering 메인
-- `_renderTokenURI(...)`
-- `_avatarTraits(AvatarConfig)`
-- `_generateSVG(uint256, RenderProfile)`
-- `_svgHead(tokenId, primary, dark, light, accent, bloomOpacity)`
-- `_svgBody(tokenId, RenderProfile, light)`
-
-### 배지
-- `_entityBadge(uint8 entityType)` — `Human`/`AI` 표시
-- `_verifiedBadge(bool verified)` — 인증 마크
-
-### 캐릭터 합성
-- `_renderCharacter(RenderProfile)` — 배경 + body + outfit + eyes + mouth + hair + accessory 순서 합성
-- `_renderBackground(uint8 opt, uint8 hue)` — 8종 배경 패턴
-- `_renderBody(uint8 skinTone, uint8 outfit)`
-- `_renderOutfit(uint8 o, string skin)`
-- `_renderMouth(uint8 opt)` — 8종 표정
-- `_renderEyes(uint8 opt)` — 8종 눈 스타일
-- `_renderHair(uint8 style, uint8 color)`
-- `_renderAccessory(uint8 opt)`
-
-### Palette
-- `_skinColor(uint8 tone)` — 피부톤 16진수
-- `_hairColorHex(uint8 c)`
-- `_outfitColor(uint8 o)`
-- `_colorFromHue(uint8 h, uint8 variant)` — hue/variant 조합으로 16색 팔레트 산출
-
-### 라벨 (JSON `attributes`용)
-- `_skinToneName`, `_hairStyleName`, `_hairColorName`, `_eyesName`, `_mouthName`, `_outfitName`, `_accessoryName`, `_backgroundName`
-
-### 유틸리티
-- `_opacityPercent(uint256 percent)` — 0..100을 "0.xx" 문자열로
-- `_base64Encode(bytes)` — RFC4648 base64
-- `_uint2str(uint256)` — 10진수 ASCII
-- `_escapeXml(string)` — SVG 안전 이스케이프 (`& < > " '`)
-- `_escapeJson(string)` — JSON 안전 이스케이프 (`" \\` 및 제어문자 `\\uXXXX`)
-- `_nextSeed(uint256)` — keccak 기반 의사난수 progression
-- `_yearOf(uint256 ts)` — Unix timestamp → 연도 (간단 산식)
-- `_splitBio(string)` — bio를 2줄로 분리
-
-## 출력 예시
-
-`tokenURI` 반환은 `data:application/json;base64,...` 형태이며, 디코드하면 다음과 같은 JSON:
+The decoded JSON contains:
 
 ```json
 {
-  "name": "alice",
-  "description": "Series9 Identity NFT",
+  "name": "Alice",
+  "description": "Series9 protocol builder. On-chain identity and payments.",
   "image": "data:image/svg+xml;base64,...",
+  "image_url": "https://cdn.example/alice.png",
   "attributes": [
     {"trait_type":"Entity Type","value":"Human"},
     {"trait_type":"Verified","value":"true"},
-    {"trait_type":"Hue","value":"42"},
-    {"trait_type":"Saturation","value":"200"},
+    {"trait_type":"Image Source","value":"Custom Photo"},
     {"trait_type":"Reputation Score","value":"9"},
-    {"trait_type":"Handle","value":"alice"},
-    {"trait_type":"Skin Tone","value":"..."},
-    {"trait_type":"Hair Style","value":"..."},
-    {"trait_type":"Hair Color","value":"..."},
-    {"trait_type":"Eyes","value":"..."},
-    {"trait_type":"Mouth","value":"..."},
-    {"trait_type":"Outfit","value":"..."},
-    {"trait_type":"Accessory","value":"..."},
-    {"trait_type":"Background","value":"..."}
+    {"trait_type":"Registered Year","value":"2023"},
+    {"trait_type":"Handle","value":"alice"}
   ]
 }
 ```
 
-## SVG 캔버스 사양
+`description` is the identity's `bio` (set at mint or via `updateProfile`, max
+128 bytes). Identities with an empty bio fall back to
+`Series9 Identity premium black, white, and gold identity card` so listings are
+never blank. The card renders the bio as three lines of up to 46 bytes each
+(~138 bytes, so the whole 128-byte limit fits for ASCII); Korean and other
+multi-byte text still truncates on the card, and the full value always reaches
+the marketplace description.
 
-- 뷰박스: `0 0 340 200`, 라운드 코너 18px
-- 베이스 색: `#070b1a` (어두운 남청), bloom 그라데이션 오버레이
-- 좌측: 88×88 아바타 영역 (`avClip` clip-path), 우측: name/handle/bio 텍스트
-- 하단: 토큰 ID + 등록 연도 푸터
+`Image Source` is `Custom Photo` for a non-empty URL and `Generated Mark`
+otherwise. The photo URL is also present in the SVG image element when set.
 
-## 구현 상태
+## Card Specification
 
-| 기능 | 상태 |
-|------|------|
-| `_renderTokenURI` 진입점 | 완전 구현 |
-| 8슬롯 아바타 합성 | 완전 구현 (skin/hair/eyes/mouth/outfit/accessory/background) |
-| Entity 배지 (Human/AI) | 완전 구현 |
-| Verified 배지 | 완전 구현 |
-| Reputation/Handle/Hue/Saturation 트레잇 노출 | 완전 구현 |
-| `data:` URI base64 인코딩 | 완전 구현 |
-| XML / JSON 이스케이프 | 완전 구현 |
-| 외부 호출 가능 함수 | **0개** — 모두 `internal`이므로 base contract로만 사용 |
-| 스토리지 사용 | **0 슬롯** — 상태 없음 |
+- Viewbox: `0 0 720 440`, rounded black card.
+- Palette: deep black (`#08080a`), warm near-black panel (`#121116`), white
+  (`#f6f3ea`), champagne gold (`#cfae74`), and muted gray (`#8f8f91`).
+  The card ground is a three-stop gradient (`#16151a` → `#0d0d10` → `#08080a`),
+  and gold accents use the `gold` linear gradient
+  (`#f2e3bd` → `#cfae74` → `#8c7040`).
+- Layout grid: 40px margin on all four sides, so every element sits between
+  `x=40` and `x=680`.
+  - Photo column: `x[40,252]`, `y[112,364]`.
+  - Data column: `x[290,680]`, split into three 130px stat columns at
+    `x=290 / 420 / 550`.
+  - No horizontal rules anywhere: sections are separated by whitespace alone,
+    and there is no footer wordmark — the rim ring carries the branding.
+- Entity pill and verification mark are right-aligned to `x=680`; the pill's
+  left edge is `642 - pillWidth` so both entity types keep the same trailing gap.
+- Gold border, engraved rim ring, and a soft radial halo behind the photo column.
+- Rim ring: `@handle · #tokenId` repeats around the full card perimeter along the
+  `rim` path (rounded rect inset 18, `rx=16`, 2148px long) and scrolls around the
+  card continuously, one full lap per 60s. Two identical laps are emitted as
+  separate `<text>` elements, each with its own `textLength="2148"`, so each lap
+  is stretched to exactly the path length and the pair tiles the rim with a
+  period of exactly 2148 regardless of font metrics. One lap chases the other
+  (`0 → -2148` while `2148 → 0`), so the rim is always fully covered and the end
+  of a cycle renders pixel-identically to its start.
+  A single stretched run holding both laps does *not* work: `lengthAdjust`
+  spreads the slack across every glyph gap including the junction, making the
+  real period `2148 + gap/2` and the wrap jump about a pixel.
+  Identities without a handle use `SERIES9 IDENTITY · #tokenId`. This SMIL
+  `<animate>` on the rim is the card's only motion; everything else is static.
+- Framed photo or generated mark on the left.
+- Name, handle, and bio on the right, then one compact stat line: `REP <score>`
+  at `x=290` and `SINCE <year>` at `x=485`, each a small gray label and its value
+  on a shared baseline. Verification is shown only by the header badge, and the
+  token id only by the rim ring and `<title>`.
+- No hue palette, character layers, or avatar traits.
 
-## 보안/품질 노트
+Sample cards are generated by
+`forge script script/RenderIdentityCard.s.sol:RenderIdentityCard`, which writes
+`examples/identity-card.svg` and `examples/identity-card-ai-photo.svg`.
 
-1. **순수 함수**: 모든 함수가 `internal pure` — 외부 호출 차단 + 가스 측정 안정성.
-2. **이스케이프 처리**: `_escapeXml`은 SVG 인젝션 방지, `_escapeJson`은 JSON 파서 안전성 보장.
-3. **결정론적 렌더링**: 같은 입력이면 항상 같은 출력 (스토리지 의존 없음).
-4. **확장성**: 새 슬롯/팔레트를 추가하려면 `AvatarConfig` 구조와 모든 `_*Name` 라벨 함수, 렌더 함수를 함께 업데이트해야 함. `Series9Identity`의 storage layout(`avatarConfig`)도 동일 구조여야 하므로 업그레이드 시 주의.
+## Utility Functions
 
-## Series9Identity와의 관계
+- `_base64Encode(bytes)` — RFC 4648 base64 encoding.
+- `_uint2str(uint256)` — decimal ASCII conversion.
+- `_escapeXml(string)` — escapes XML metacharacters and sanitizes control bytes.
+- `_escapeJson(string)` — escapes JSON quotes, slashes, and control bytes.
+- `_yearOf(uint256)` — converts the registration timestamp to the displayed year.
+- `_splitBio(string)` — splits the bio into the card's three lines.
+- `_takeBioLine(bytes,uint256)` — takes one <=46 byte line, preferring a space
+  boundary and otherwise cutting on a UTF-8 boundary.
+- `_rimText(uint256,string)` — builds the repeating perimeter ring text.
 
-```solidity
-contract Series9Identity is
-    Initializable,
-    ERC721Upgradeable,
-    OwnableUpgradeable,
-    PausableUpgradeable,
-    ReentrancyGuard,
-    UUPSUpgradeable,
-    Series9IdentityRenderer  // ← 상속만, 별도 배포 없음
-{
-    // ...
-    function tokenURI(uint256 tokenId) public view override returns (string memory) {
-        // profile, avatarConfig 조회 후 _renderTokenURI(...) 호출
-    }
-}
-```
+## Upgrade Notes
 
-**중요**: `Series9IdentityRenderer`는 **자체 배포되지 않습니다**. 업그레이드 시 Renderer 변경이 필요하면
-`Series9Identity` implementation을 새로 빌드/배포한 뒤 `upgradeToAndCall`로 교체하는 방식입니다.
+The renderer is part of the `Series9Identity` implementation bytecode. Deploy a
+new `Series9Identity` implementation and upgrade the proxy with UUPS
+`upgradeToAndCall`. No renderer reinitializer is needed: `imageUrls` defaults to
+empty, so existing identities show the generated mark until their owners set a
+photo URL.
+
+The preserved `avatarConfig` mapping remains before `imageUrls` at the end of
+the identity storage layout. Existing avatar data is intentionally not rendered.

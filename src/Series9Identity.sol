@@ -99,6 +99,7 @@ contract Series9Identity is
     address public constant NATIVE_MON = address(0);
     uint256 public constant MAX_AVATAR_SEED_BYTES = 64;
     uint8 public constant MAX_AVATAR_SLOT_OPTION = 7; // each AvatarConfig slot accepts values 0..7
+    uint256 public constant MAX_IMAGE_URL_BYTES = 512;
     uint256 public constant MIN_HANDLE_BYTES = 3;
     uint256 public constant MAX_HANDLE_BYTES = 32;
     uint256 public constant MAX_PAYMENT_MEMO_BYTES = 128;
@@ -172,6 +173,8 @@ contract Series9Identity is
     event IdentityHandleUpdated(uint256 indexed tokenId, string previousHandle, string newHandle);
     /// @notice Emitted when a token's avatar configuration is changed
     event AvatarUpdated(uint256 indexed tokenId, AvatarConfig config);
+    /// @notice Emitted when a token's custom photo URL is changed or cleared
+    event ImageUrlUpdated(uint256 indexed tokenId, string imageUrl);
     /// @notice Emitted when a legacy display name reserves a payment handle
     event LegacyHandleReserved(bytes32 indexed handleHash, string handle, uint256 indexed tokenId, uint64 expiresAt);
     /// @notice Emitted when all legacy handle reservations have been scanned
@@ -201,11 +204,7 @@ contract Series9Identity is
     event PaymentRequestPaid(uint256 indexed requestId, uint256 indexed paymentId);
     /// @notice Emitted when a payment request is paid via a signed authorization from the payer.
     event PaymentRequestPaidWithSig(
-        uint256 indexed requestId,
-        uint256 indexed paymentId,
-        address indexed signer,
-        address relayer,
-        uint256 nonce
+        uint256 indexed requestId, uint256 indexed paymentId, address indexed signer, address relayer, uint256 nonce
     );
     /// @notice Emitted when a payment request is cancelled
     event PaymentRequestCancelled(uint256 indexed requestId, address indexed caller);
@@ -241,6 +240,11 @@ contract Series9Identity is
     error NonexistentToken();
     error AvatarSeedTooLong();
     error InvalidAvatarSlot();
+    error AvatarFeatureRemoved();
+    error ImageUrlTooLong();
+    error InvalidImageUrlScheme();
+    error ImageUrlPayloadEmpty();
+    error ImageUrlContainsControlCharacter();
     error PaymentNotInitialized();
     error LegacyHandleReservationsNotFinalized();
     error InvalidHandle();
@@ -478,29 +482,27 @@ contract Series9Identity is
         emit ProfileUpdated(tokenId, name, bio, p.entityType);
     }
 
-    /// @notice Set a custom avatar seed for advanced generative art
-    /// @dev Deprecated: retained for backward compatibility; the active renderer ignores this value.
-    function setCustomAvatarSeed(uint256 tokenId, string calldata seed) external whenNotPaused {
-        if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
-        if (bytes(seed).length > MAX_AVATAR_SEED_BYTES) revert AvatarSeedTooLong();
-        customAvatarSeed[tokenId] = seed;
+    /// @notice Deprecated avatar seed editing is unavailable in the photo-card renderer.
+    /// @dev The function remains only for proxy and ABI compatibility.
+    function setCustomAvatarSeed(uint256, string calldata) external whenNotPaused {
+        revert AvatarFeatureRemoved();
     }
 
-    /// @notice Update the 8-slot character avatar for a token. Each slot accepts values 0..MAX_AVATAR_SLOT_OPTION.
-    function setAvatar(uint256 tokenId, AvatarConfig calldata config) external whenNotPaused {
+    /// @notice Set or clear the owner-selected photo used by the identity card.
+    /// @dev Empty strings restore the generated identity mark. Only common external image URI schemes are accepted.
+    function setImageUrl(uint256 tokenId, string calldata imageUrl) external whenNotPaused {
+        if (_ownerOf(tokenId) == address(0)) revert NonexistentToken();
         if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
-        _validateAvatarConfig(config);
-        avatarConfig[tokenId] = config;
-        emit AvatarUpdated(tokenId, config);
+
+        _validateImageUrl(imageUrl);
+        imageUrls[tokenId] = imageUrl;
+        emit ImageUrlUpdated(tokenId, imageUrl);
     }
 
-    function _validateAvatarConfig(AvatarConfig calldata c) internal pure {
-        if (
-            c.skinTone > MAX_AVATAR_SLOT_OPTION || c.hairStyle > MAX_AVATAR_SLOT_OPTION
-                || c.hairColor > MAX_AVATAR_SLOT_OPTION || c.eyes > MAX_AVATAR_SLOT_OPTION
-                || c.mouth > MAX_AVATAR_SLOT_OPTION || c.outfit > MAX_AVATAR_SLOT_OPTION
-                || c.accessory > MAX_AVATAR_SLOT_OPTION || c.background > MAX_AVATAR_SLOT_OPTION
-        ) revert InvalidAvatarSlot();
+    /// @notice Deprecated character avatar editing is unavailable in the photo-card renderer.
+    /// @dev The function remains only for proxy and ABI compatibility.
+    function setAvatar(uint256, AvatarConfig calldata) external whenNotPaused {
+        revert AvatarFeatureRemoved();
     }
 
     // ─────────────────── Payment Handles ───────────────────
@@ -1231,6 +1233,50 @@ contract Series9Identity is
         return keccak256(rawHandle);
     }
 
+    function _validateImageUrl(string calldata imageUrl) internal pure {
+        bytes memory rawImageUrl = bytes(imageUrl);
+        if (rawImageUrl.length == 0) {
+            return;
+        }
+        if (rawImageUrl.length > MAX_IMAGE_URL_BYTES) revert ImageUrlTooLong();
+
+        for (uint256 i = 0; i < rawImageUrl.length; i++) {
+            uint8 c = uint8(rawImageUrl[i]);
+            if (c < 0x20 || c == 0x7f) revert ImageUrlContainsControlCharacter();
+        }
+
+        if (_startsWith(rawImageUrl, bytes("https://"))) {
+            if (rawImageUrl.length == 8) revert ImageUrlPayloadEmpty();
+            return;
+        }
+        if (_startsWith(rawImageUrl, bytes("http://"))) {
+            if (rawImageUrl.length == 7) revert ImageUrlPayloadEmpty();
+            return;
+        }
+        if (_startsWith(rawImageUrl, bytes("ipfs://"))) {
+            if (rawImageUrl.length == 7) revert ImageUrlPayloadEmpty();
+            return;
+        }
+        if (_startsWith(rawImageUrl, bytes("ar://"))) {
+            if (rawImageUrl.length == 5) revert ImageUrlPayloadEmpty();
+            return;
+        }
+
+        revert InvalidImageUrlScheme();
+    }
+
+    function _startsWith(bytes memory value, bytes memory prefix) internal pure returns (bool) {
+        if (value.length < prefix.length) {
+            return false;
+        }
+        for (uint256 i = 0; i < prefix.length; i++) {
+            if (value[i] != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     function _legacyHandleSlug(string memory name) internal pure returns (string memory) {
         bytes memory source = bytes(name);
         uint256 start;
@@ -1331,7 +1377,9 @@ contract Series9Identity is
         returns (bytes32)
     {
         return keccak256(
-            abi.encodePacked("\x19\x01", paymentDomainSeparator(), payPaymentRequestStructHash(requestId, nonce, deadline))
+            abi.encodePacked(
+                "\x19\x01", paymentDomainSeparator(), payPaymentRequestStructHash(requestId, nonce, deadline)
+            )
         );
     }
 
@@ -1400,13 +1448,11 @@ contract Series9Identity is
             p.name,
             p.bio,
             uint8(p.entityType),
-            p.hue,
-            p.saturation,
             p.verified,
             p.registeredAt,
             _reputationScore(tokenId),
             handles[tokenId],
-            avatarConfig[tokenId]
+            imageUrls[tokenId]
         );
     }
 
@@ -1452,7 +1498,11 @@ contract Series9Identity is
     // Appended at the END of the layout (NOT at its original mid-layout slot) to undo the v0.3.0 insertion
     // that shifted all later storage by +1 on deployed proxies. Pre-existing entries (written under the old
     // mid-layout base slot) are relocated here by {repairAvatarConfigLayout}.
-    mapping(uint256 => AvatarConfig) public avatarConfig; // 8-slot character avatar customization
+    mapping(uint256 => AvatarConfig) public avatarConfig; // Legacy 8-slot avatar storage; never rendered.
 
-    uint256[28] private __gap;
+    // Storage-layout invariant: append after the preserved avatarConfig mapping. Do not reorder or change
+    // avatarConfig or any preceding field; this consumes exactly one slot from the upgrade gap.
+    mapping(uint256 => string) public imageUrls;
+
+    uint256[27] private __gap;
 }

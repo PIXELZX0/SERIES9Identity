@@ -5,8 +5,11 @@ import {Script, console} from "forge-std/Script.sol";
 
 import {Series9Identity} from "../src/Series9Identity.sol";
 
-/// @notice Deploys a new Series9Identity implementation that ships the 8-slot character avatar feature,
-///         and emits a Safe TX Builder JSON that upgrades the existing proxy via UUPS upgradeToAndCall.
+/// @notice Deploys a new Series9Identity implementation that ships the champagne-gold identity card
+///         (scrolling handle/token-id rim ring, three-line bio, REP / SINCE stats, bio as the NFT
+///         description), and emits a Safe TX Builder JSON that upgrades the existing proxy via UUPS
+///         upgradeToAndCall. Storage layout is unchanged, so no reinitializer is needed.
+///         Legacy avatar storage and ABI declarations remain preserved but are no longer rendered or editable.
 ///
 /// Required env:
 ///   PRIVATE_KEY=0x...
@@ -16,9 +19,9 @@ import {Series9Identity} from "../src/Series9Identity.sol";
 ///   SKIP_VERIFY=true       skip on-chain source verification
 ///
 /// Usage:
-///   PRIVATE_KEY=0x... IDENTITY_PROXY=0x... forge script script/UpgradeIdentityAvatar.s.sol \
+///   PRIVATE_KEY=0x... IDENTITY_PROXY=0x... forge script script/UpgradeIdentityMetadata.s.sol \
 ///     --rpc-url $MONAD_RPC_URL --broadcast --ffi --profile deploy
-contract UpgradeIdentityAvatar is Script {
+contract UpgradeIdentityMetadata is Script {
     string constant SOURCIFY_VERIFIER_URL = "https://sourcify-api-monad.blockvision.org";
     string constant SOCIALSCAN_VERIFIER_URL = "https://api.socialscan.io/monad/v1/explorer/command_api/contract";
     string constant CHAIN_ID = "143";
@@ -50,20 +53,21 @@ contract UpgradeIdentityAvatar is Script {
         }
 
         // --- Phase 3: Emit Safe TX Builder JSON for UUPS upgradeToAndCall ---
-        // No reinitializer needed: new avatarConfig mapping defaults to zero (baseline character).
-        bytes memory upgradeCalldata = abi.encodeWithSignature("upgradeToAndCall(address,bytes)", newImplAddr, bytes(""));
+        // No reinitializer needed: this upgrade only changes rendering; storage layout is untouched.
+        bytes memory upgradeCalldata =
+            abi.encodeWithSignature("upgradeToAndCall(address,bytes)", newImplAddr, bytes(""));
 
         string memory json = string.concat(
             '{"version":"1.0","chainId":"',
             CHAIN_ID,
-            '","meta":{"name":"Series9 Identity Avatar Upgrade","description":"Upgrade Series9Identity proxy to the implementation that ships the 8-slot character avatar feature"},"transactions":[{"to":"',
+            '","meta":{"name":"Series9 Identity Metadata Upgrade","description":"Upgrade Series9Identity proxy to the champagne-gold identity card renderer: scrolling rim ring, three-line bio, REP/SINCE stats, and the owner bio as the NFT description"},"transactions":[{"to":"',
             vm.toString(identityProxy),
             '","value":"0","data":"',
             vm.toString(upgradeCalldata),
             '"}]}'
         );
 
-        string memory outputPath = "safe-tx-upgrade-identity-avatar.json";
+        string memory outputPath = "safe-tx-upgrade-identity-metadata.json";
         // forge-lint: disable-next-line(unsafe-cheatcode)
         vm.writeFile(outputPath, json);
 

@@ -15,7 +15,8 @@ Foundry 기반의 Series9 identity NFT + identity 지갑 컨트랙트입니다.
   - identity NFT 소유자만 `execute` / 배치 실행 / 컨트랙트 배포 가능
   - 업그레이드 권한: 현 NFT 보유자 + Identity 허용목록(`setWalletImplApproved`) + 다운그레이드 금지
   - v2는 ERC-1271 `isValidSignature` 추가
-- `Series9IdentityRenderer`: 온체인 SVG/JSON 메타데이터 렌더러 (Identity의 base)
+  - `Series9IdentityRenderer`: 온체인 black/white/gold identity card SVG/JSON 메타데이터 렌더러
+  - 각 identity owner는 `setImageUrl`로 `https://`, `http://`, `ipfs://`, `ar://` 사진 URL을 설정하거나 비울 수 있음
 
 ## 주요 규칙
 
@@ -65,7 +66,7 @@ forge script script/DeployIdentity.s.sol:DeployIdentity \
 
 - `script/UpgradeSeries9Identity.s.sol` — Identity implementation + 지갑 팩토리 부트스트랩
 - `script/UpgradeIdentityWalletV2.s.sol` — 지갑 로직 v2 배포 + 허용목록 등록
-- `script/UpgradeIdentityAvatar.s.sol` — 아바타 렌더러 관련 업그레이드
+- `script/UpgradeIdentityMetadata.s.sol` — photo URL 메타데이터 카드 렌더러 업그레이드
 
 ## GitHub Actions
 
