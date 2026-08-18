@@ -3,7 +3,7 @@
 | 항목 | 값 |
 |------|----|
 | 파일 | [`src/Series9Identity.sol`](../src/Series9Identity.sol) |
-| 라인 수 | 1,380 |
+| 라인 수 | — |
 | 상속 | `Initializable`, `ERC721Upgradeable`, `OwnableUpgradeable`, `PausableUpgradeable`, `ReentrancyGuard`, `UUPSUpgradeable`, [`Series9IdentityRenderer`](./Series9IdentityRenderer.md) |
 | 이름 / 심볼 | `Series9 Identity` / `S9ID` |
 | 업그레이드 | UUPS, `_authorizeUpgrade` = `onlyOwner` |
@@ -22,6 +22,7 @@
   `createPaymentRequest` → `payPaymentRequest`로 청구/결제 흐름을 사용할 수 있습니다.
 - EIP-712 서명으로 결제 권한을 **위임**(`payPaymentRequestWithSig`)할 수 있어, 가스/실행 주체와 자금 출처 분리 가능.
 - 메타데이터(SVG/JSON)는 100% 온체인으로 `Series9IdentityRenderer`가 생성합니다.
+- 각 identity owner는 `setImageUrl`로 `https://`, `http://`, `ipfs://`, `ar://` 사진 URL을 설정하거나 비울 수 있습니다. 비우면 생성된 identity mark가 표시됩니다.
 
 ## 주요 상수
 
@@ -29,8 +30,9 @@
 |------|----|------|
 | `PRECISION` | `1e18` | reward 인덱스 스케일 |
 | `NATIVE_MON` | `address(0)` | MON 결제 표기 |
-| `MAX_AVATAR_SEED_BYTES` | `64` | (deprecated) 커스텀 시드 최대 |
-| `MAX_AVATAR_SLOT_OPTION` | `7` | 8슬롯 아바타 각 필드 0~7 |
+| `MAX_AVATAR_SEED_BYTES` | `64` | legacy 선언만 유지; 커스텀 시드 setter는 비활성화 |
+| `MAX_AVATAR_SLOT_OPTION` | `7` | legacy 선언만 유지; 8슬롯 avatar setter는 비활성화 |
+| `MAX_IMAGE_URL_BYTES` | `512` | 비어 있지 않은 photo URL의 최대 byte 길이 |
 | `MIN_HANDLE_BYTES` / `MAX_HANDLE_BYTES` | `3` / `32` | handle 길이 제한 |
 | `MAX_PAYMENT_MEMO_BYTES` | `128` | memo 최대 |
 | `LEGACY_HANDLE_PRIORITY_DURATION` | `30 days` | 기존 보유자가 legacy handle을 우선 클레임할 수 있는 기간 |
@@ -57,7 +59,7 @@ struct PaymentRequest {
     PaymentRequestStatus status; string memo;
 }
 
-// Series9IdentityRenderer에서 상속
+// Series9IdentityRenderer에서 상속; legacy ABI/storage 호환성용이며 active renderer에서는 사용하지 않음
 struct AvatarConfig {
     uint8 skinTone; uint8 hairStyle; uint8 hairColor; uint8 eyes;
     uint8 mouth; uint8 outfit; uint8 accessory; uint8 background;
@@ -71,7 +73,8 @@ struct AvatarConfig {
 - `mapping(uint256 => IdentityProfile) public profiles`
 - `mapping(address => uint256) public ownerTokenId` — **1 주소 1 NFT**
 - `mapping(uint256 => string) public customAvatarSeed` — **deprecated**, 렌더러 무시
-- `mapping(uint256 => AvatarConfig) public avatarConfig` — 8슬롯 아바타
+- `mapping(uint256 => AvatarConfig) public avatarConfig` — legacy 8슬롯 storage. layout 끝에 append되어 있으며 렌더러에서 읽지 않고 setter도 비활성화
+- `mapping(uint256 => string) public imageUrls` — owner가 설정한 photo URL. `avatarConfig` 바로 뒤, layout 끝에 append됨
 
 ### 결제 인프라
 - `IERC20 public ser9`, `address public stakingContract`
@@ -97,13 +100,13 @@ struct AvatarConfig {
 - `mapping(uint256 => uint256[]) private _payerPaymentRequestIds / _payeePaymentRequestIds`
 - `mapping(address => uint256) public paymentNonces` — EIP-712 서명 nonce
 
-### 지갑 + 에스크로 (slot 25~29)
+### 지갑 + 에스크로 (slot 24~29)
 - `address public walletImplementation`, `mapping(uint256=>address) public walletOf`, `mapping(address=>uint256) public walletImplVersion`
-- `mapping(uint256=>IdentityTransfer) private _identityTransfers`, `bool private _escrowTransferInProgress`
+- `mapping(uint256=>IdentityTransfer) private _identityTransfers`, `uint256 private _escrowTransferTokenId` — finalize 중 이동을 승인한 token id. finalize 내부에서만 설정되며 해당 tokenId만 `_update` 게이트를 통과
 - 위 [가상 지갑 + 정체성 전송](#가상-지갑-smart-account-wallet--정체성-전송-escrow) 섹션 참조
 
 ### Storage gap
-- `uint256[30] private __gap` (기존 `[35]`에서 신규 5슬롯 소비)
+- 현재 소스의 `avatarConfig` + `imageUrls`를 layout 끝에 append한 뒤 `uint256[27] private __gap`을 유지합니다.
 
 ## Initialize
 
@@ -139,15 +142,24 @@ struct AvatarConfig {
 | `pendingNFTRewards(address)` view | — | 미청구 NFT 보상 미리보기 |
 | `pendingStakingRewards()` view | — | staking 컨트랙트 측 `rewards(address(this))` |
 
-### Profile / Avatar
+### Profile / Photo URL
 
 | 함수 | 보호 | 동작 |
 |------|------|------|
-| `updateProfile(tokenId, name, bio, hue, saturation)` | whenNotPaused, 토큰 소유자 | 32/128 byte 제한, entityType은 변경 불가 |
-| `setAvatar(tokenId, AvatarConfig)` | 동일 | 각 슬롯 0~7 검증 후 저장 |
-| `setCustomAvatarSeed(tokenId, seed)` | 동일 | **deprecated**, 렌더러 무시 (스토리지 호환성용) |
+| `updateProfile(tokenId, name, bio, hue, saturation)` | whenNotPaused, 토큰 소유자 | name/bio는 각각 32/128 byte 제한, entityType은 변경 불가. hue/saturation은 보존되지만 active photo-card renderer에서는 사용하지 않음 |
+| `setImageUrl(tokenId, imageUrl)` | whenNotPaused, 토큰 소유자 | 빈 문자열은 photo를 지우고 generated mark로 복원. 그 외에는 최대 `MAX_IMAGE_URL_BYTES` byte, ASCII control character 금지, `https://`, `http://`, `ipfs://`, `ar://` 중 하나의 정확한 scheme과 비어 있지 않은 payload 필요. `imageUrls[tokenId]`에 저장 후 `ImageUrlUpdated` emit |
+| `setAvatar(tokenId, AvatarConfig)` | whenNotPaused | **disabled**. pause gate를 통과하면 `AvatarFeatureRemoved` revert; legacy ABI/storage 호환성만 유지하며 active renderer에서 무시 |
+| `setCustomAvatarSeed(tokenId, seed)` | whenNotPaused | **disabled**. pause gate를 통과하면 `AvatarFeatureRemoved` revert; legacy storage/ABI 호환성만 유지하며 active renderer에서 무시 |
 | `verify(tokenId, bool status)` | onlyOwner | 프로필 `verified` flag 토글 |
 | `setReputationScore(tokenId, newScore)` | onlyOwner | 1~`MAX_REPUTATION_SCORE`. 변경 전 owner의 보상 정산(`_accrueNFTReward`) 후 `totalReputationScore` 재계산 |
+
+### Photo URL 메타데이터 동작
+
+- `tokenURI(tokenId)`는 `imageUrls[tokenId]`를 renderer에 전달합니다. 반환 형식은 기존과 같이 `data:application/json;base64,...`입니다.
+- `imageUrls[tokenId]`가 비어 있으면 JSON의 `image_url`은 빈 문자열이고 `Image Source` trait은 `Generated Mark`입니다. SVG 왼쪽에는 온체인 S9 generated mark가 표시됩니다.
+- URL이 설정되면 JSON의 `image_url`에 해당 URL이 들어가고 `Image Source` trait은 `Custom Photo`가 됩니다. SVG에는 URL을 `href`로 사용하는 clipped/framed photo가 표시됩니다.
+- JSON과 SVG 자체는 온체인으로 생성되지만, `image_url`이 가리키는 실제 사진 리소스는 외부 URI/IPFS/Arweave에 있을 수 있습니다. URL은 XML/JSON escaping 후 metadata에 포함됩니다.
+- active renderer는 legacy `AvatarConfig`, `customAvatarSeed`, hue, saturation 및 avatar trait/animation을 읽지 않습니다.
 
 ### Handle
 
@@ -235,7 +247,7 @@ handle 정규화 규칙(`_legacyHandleSlug`):
 
 ### 1 주소 1 NFT 강제 (`_update`)
 - 전송/발행 모두 `_update`를 거침.
-- **직접 전송 차단**: `currentOwner != 0 && to != 0 && !_escrowTransferInProgress`이면 `TransferRestricted`. owner→owner 일반 ERC721 전송은 막히고, 에스크로 `finalizeIdentityTransfer`(플래그 set) 또는 mint/burn만 통과.
+- **직접 전송 차단**: `currentOwner != 0 && to != 0 && _escrowTransferTokenId != tokenId`이면 `TransferRestricted`. owner→owner 일반 ERC721 전송은 막히고, 에스크로 `finalizeIdentityTransfer`에서 해당 tokenId를 승인한 경우 또는 mint/burn만 통과.
 - `from != 0 && ownerTokenId[from] == tokenId`이면 from의 보상 정산 후 `ownerTokenId[from]` 삭제.
 - `to != 0`에 이미 다른 `tokenId`가 매핑되어 있으면 `AlreadyHasIdentity`로 revert (전송 차단).
 - `totalReputationScore`가 0이고 발행 이력이 있으면 `_computeTotalReputationScore()`로 재산정 (마이그레이션 안전망).
@@ -260,14 +272,19 @@ paid = nftRewardPerToken
 | `AlreadyHasIdentity(account)` | mint 또는 transfer로 1 주소 1 NFT 위배 |
 | `InsufficientMintAllowance()` | (선언만, 미사용 — staking 실패는 `StakingFailed`로 표현) |
 | `NameTooLong()` / `BioTooLong()` | 32 / 128 byte 초과 |
-| `NotTokenOwner()` | profile/avatar/handle 변경 권한 없음 |
+| `NotTokenOwner()` | profile/photo/handle 변경 권한 없음 |
 | `InvalidHue()` | (선언만 존재) |
 | `ZeroSer9Address()` / `InvalidStakingContract()` | initialize / 어드민 검증 |
 | `StakingFailed()` | staking 후에도 SER9 잔액이 증가 (실제로 풀로 들어가지 않음) |
 | `NotNFTHolder()` / `NoNFTRewards()` | 보상 청구 자격/잔액 부족 |
 | `InvalidReputationScore()` | 0 또는 `MAX_REPUTATION_SCORE` 초과 |
 | `NonexistentToken()` | view/admin 호출 시 토큰 미존재 |
-| `AvatarSeedTooLong()` / `InvalidAvatarSlot()` | 입력 검증 |
+| `AvatarFeatureRemoved()` | pause gate를 통과한 legacy `setAvatar` 및 `setCustomAvatarSeed` 호출은 비활성화 |
+| `AvatarSeedTooLong()` / `InvalidAvatarSlot()` | legacy 선언만 유지; 현재 활성 호출 경로 없음 |
+| `ImageUrlTooLong()` | 빈 문자열이 아닌 photo URL이 `MAX_IMAGE_URL_BYTES` 초과 |
+| `InvalidImageUrlScheme()` | 빈 문자열이 아닌 URL이 지원 scheme으로 시작하지 않음 |
+| `ImageUrlPayloadEmpty()` | URL이 지원 scheme 자체로 끝나 payload가 없음 |
+| `ImageUrlContainsControlCharacter()` | URL에 ASCII control byte(`< 0x20` 또는 `0x7f`) 포함 |
 | `PaymentNotInitialized()` | `_nextPaymentId/_nextPaymentRequestId`가 0 (v1 프록시 미마이그레이션) |
 | `LegacyHandleReservationsNotFinalized()` | seed가 끝나기 전 + deadline 이전 |
 | `InvalidHandle()` / `HandleAlreadyTaken()` / `HandleReserved(...)` / `UnknownHandle()` | handle 규칙/충돌 |
@@ -283,7 +300,8 @@ AIMintFeeUpdated, HumanMintFeeUpdated, StakingContractUpdated
 ProfileVerified, ProfileUpdated
 IdentityStaked, StakingRewardsCollected, NFTRewardClaimed
 ReputationScoreUpdated
-IdentityHandleUpdated, AvatarUpdated
+IdentityHandleUpdated, ImageUrlUpdated
+AvatarUpdated (legacy declaration; disabled setter에서는 emit하지 않음)
 LegacyHandleReserved, LegacyHandleReservationsFinalized
 IdentityPaymentSent
 PaymentRequestCreated, PaymentRequestPaid, PaymentRequestPaidWithSig, PaymentRequestCancelled
@@ -303,13 +321,13 @@ enum TransferStatus { None, Pending, Accepted, Completed, Cancelled }
 struct IdentityTransfer { address from; address to; uint64 acceptedAt; TransferStatus status; }
 ```
 
-### 스토리지 (slot 25~29, `__gap` 35→30)
+### 스토리지 (slot 24~29)
 
 - `address public walletImplementation` — 고정 bootstrap 지갑 impl (프록시 birth 로직). 한 번 설정 후 불변 → CREATE2 주소 결정론 보장. setter 없음
 - `mapping(uint256 => address) public walletOf` — identity별 배포된 지갑 (0 = 미생성)
 - `mapping(address => uint256) public walletImplVersion` — 허용된 지갑 impl과 버전 (0 = 미승인)
 - `mapping(uint256 => IdentityTransfer) private _identityTransfers` — identity별 활성 전송
-- `bool private _escrowTransferInProgress` — finalize 내부에서만 set, `_update` 게이트 통과용
+- `uint256 private _escrowTransferTokenId` — finalize 중 이동을 승인한 token id. finalize 내부에서만 설정되며 해당 tokenId만 `_update` 게이트를 통과
 
 ### `initializeWalletFactory(bootstrapImpl) reinitializer(3) onlyOwner`
 
@@ -337,12 +355,12 @@ struct IdentityTransfer { address from; address to; uint64 acceptedAt; TransferS
 | `initiateIdentityTransfer(to)` | whenNotPaused | 보유자가 전송 시작. `to`가 0/본인/기 보유자면 revert(`InvalidTransferRecipient`/`AlreadyHasIdentity`). 즉시 Pending → 지갑 freeze |
 | `acceptIdentityTransfer(tokenId)` | whenNotPaused | 수신자만. Pending→Accepted, `acceptedAt=now`, 6시간 타이머 시작 |
 | `cancelIdentityTransfer(tokenId)` | (paused 무관) | 송신·수신 누구나, 완료 전 언제든 취소. Pending/Accepted→Cancelled |
-| `finalizeIdentityTransfer(tokenId)` | whenNotPaused, nonReentrant | permissionless. Accepted + `now >= acceptedAt+6h` 필요(아니면 `TransferDelayNotElapsed(readyAt)`). `_escrowTransferInProgress` 플래그 하에 `_safeTransfer`로 NFT 이전 → 지갑 통제권·잔액이 새 owner로 이동, freeze 해제 |
+| `finalizeIdentityTransfer(tokenId)` | whenNotPaused, nonReentrant | permissionless. Accepted + `now >= acceptedAt+6h` 필요(아니면 `TransferDelayNotElapsed(readyAt)`). `_escrowTransferTokenId = tokenId`로 해당 이동만 승인한 뒤 `_transfer`로 NFT 이전 → 지갑 통제권·잔액이 새 owner로 이동, freeze 해제 |
 | `identityTransferOf(tokenId)` view | — | `(from, to, acceptedAt, status)` |
 
 ### 직접 전송 차단 (`_update`)
 
-`_update` 진입 시 `currentOwner != 0 && to != 0 && !_escrowTransferInProgress`이면 `TransferRestricted`. 즉 mint(0→x)·burn(x→0)은 허용, owner→owner 일반 전송은 차단되고 오직 finalize 경로(플래그 set)만 통과합니다.
+`_update` 진입 시 `currentOwner != 0 && to != 0 && _escrowTransferTokenId != tokenId`이면 `TransferRestricted`. 즉 mint(0→x)·burn(x→0)은 허용, owner→owner 일반 전송은 차단되고 오직 finalize 경로에서 해당 tokenId를 승인한 경우만 통과합니다.
 
 ### 새 Errors
 
@@ -358,9 +376,9 @@ struct IdentityTransfer { address from; address to; uint64 acceptedAt; TransferS
 |------|------|------|
 | 1 주소 1 NFT mint (Human/AI 수수료 차등) | 완전 구현 | 전송 시에도 강제됨 |
 | 수수료 자동 staking | 완전 구현 | mint 흐름에 통합, 사후 balance 검증 |
-| Profile 업데이트 (name/bio/hue/saturation) | 완전 구현 | entityType 불변 |
-| Avatar 8슬롯 시스템 | 완전 구현 | 각 슬롯 0~7 |
-| `customAvatarSeed` | **deprecated** | 스토리지/setter만 남고 렌더러는 무시 |
+| Profile 업데이트 (name/bio/hue/saturation) | 완전 구현 | entityType 불변; active renderer는 hue/saturation을 사용하지 않음 |
+| Photo URL (`imageUrls` / `setImageUrl`) | 완전 구현 | 지원 scheme, payload, control byte, 512 byte 제한; empty면 generated mark |
+| Legacy avatar storage (`avatarConfig`, `customAvatarSeed`) | **legacy only** | storage/ABI 호환성만 유지, setter는 `AvatarFeatureRemoved`, 렌더러에서 무시 |
 | Reputation 가중 보상 분배 | 완전 구현 | totalScore lazy-rebuild로 마이그레이션 안전 |
 | `collectStakingRewards` (permissionless) | 완전 구현 | 누구나 보상 풀로 운반 가능 |
 | Handle 등록 + 검증 | 완전 구현 | `[a-z0-9-]`, 3~32 byte |
@@ -383,7 +401,7 @@ struct IdentityTransfer { address from; address to; uint64 acceptedAt; TransferS
 
 ## Storage gap
 
-`uint256[30] private __gap` (기존 `[35]`). 지갑/에스크로용 5개 상태변수(slot 25~29)를 append하며 같은 양만큼 감소 — 기존 슬롯 0~24 불변으로 업그레이드 호환성 유지.
+현재 `Series9Identity.sol`은 layout 끝에 보존된 `avatarConfig` mapping과 active `imageUrls` mapping을 append한 뒤 `uint256[27] private __gap`을 사용합니다. `avatarConfig`는 legacy storage/ABI 호환성용이며 active renderer에서 읽지 않고, `imageUrls`만 photo metadata에 사용됩니다.
 
 ## 운영 노트
 

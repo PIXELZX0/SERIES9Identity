@@ -9,10 +9,10 @@ SER9 토큰 / 스테이킹 문서는 [SERIES9](https://github.com/PIXELZX0/SERIE
 
 | 컨트랙트 | 파일 | 라인 수 | 역할 |
 |----------|------|--------:|------|
-| `Series9Identity` | [`src/Series9Identity.sol`](../src/Series9Identity.sol) | 1,380 | 1 주소당 하나의 identity ERC721 + handle 기반 결제 + 지갑 팩토리 + 에스크로 전송 |
+| `Series9Identity` | [`src/Series9Identity.sol`](../src/Series9Identity.sol) | — | 1 주소당 하나의 identity ERC721 + handle 기반 결제 + 지갑 팩토리 + 에스크로 전송 + photo URL |
 | `Series9IdentityWallet` | [`src/Series9IdentityWallet.sol`](../src/Series9IdentityWallet.sol) | 153 | identity별 스마트 어카운트 지갑 (execute/배포, NFT 귀속 권한, 허용목록 업그레이드) |
 | `Series9IdentityWalletV2` | [`src/Series9IdentityWalletV2.sol`](../src/Series9IdentityWalletV2.sol) | — | 지갑 로직 v2 — ERC-1271 `isValidSignature` 추가 |
-| `Series9IdentityRenderer` | [`src/Series9IdentityRenderer.sol`](../src/Series9IdentityRenderer.sol) | 1,150 | 온체인 SVG/JSON 메타데이터 렌더러 (Identity의 base) |
+| `Series9IdentityRenderer` | [`src/Series9IdentityRenderer.sol`](../src/Series9IdentityRenderer.sol) | — | black/white/gold static identity card SVG/JSON 메타데이터 렌더러 (Identity의 base) |
 
 ## 개별 문서
 
@@ -33,8 +33,9 @@ SER9 토큰 / 스테이킹 문서는 [SERIES9](https://github.com/PIXELZX0/SERIE
 | 지갑 소유자 주도 업그레이드 (허용목록 + 다운그레이드 금지) | 완전 구현 |
 | 지갑 ERC-1271 `isValidSignature` (로직 v2) | 완전 구현 |
 | 정체성 에스크로 전송 (수락 + 6시간 지연 + 양측 취소, 전송 중 지갑 동결) | 완전 구현 |
+| Identity photo URL / generated mark metadata | 완전 구현 |
 | `tokenCreationFee` / `accruedCreationFees` / `sweepCreationFees` | **사용되지 않는 dead code** (managedToken 제거 후 잔재, sweep만 가능하나 누적 경로 없음) |
-| `customAvatarSeed` (mapping + setter) | **deprecated** — 렌더러에서 무시함 (스토리지 호환성 유지용) |
+| `avatarConfig` / `customAvatarSeed` | **legacy only** — storage/ABI 호환성만 유지, setter는 `AvatarFeatureRemoved`, 렌더러에서 무시 |
 
 자세한 구현/미구현 내역은 각 컨트랙트 문서의 **"구현 상태"** 섹션을 참조하세요.
 

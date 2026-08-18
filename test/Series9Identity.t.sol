@@ -42,27 +42,31 @@ contract Series9IdentityRendererHarness is Series9IdentityRenderer {
         return _escapeJson(value);
     }
 
-    function exposedGenerateSvg(string memory handle) external pure returns (string memory) {
+    function exposedGenerateSvgWithBio(string memory bio) external pure returns (string memory) {
+        RenderProfile memory p = RenderProfile({
+            name: "Alice",
+            bio: bio,
+            entityType: 0,
+            verified: false,
+            registeredAt: 1_700_000_000,
+            reputationScore: 9,
+            handle: "alice",
+            imageUrl: ""
+        });
+
+        return _generateSVG(1, p);
+    }
+
+    function exposedGenerateSvg(string memory handle, string memory imageUrl) external pure returns (string memory) {
         RenderProfile memory p = RenderProfile({
             name: "Alice",
             bio: "on-chain user",
             entityType: 0,
-            hue: 100,
-            saturation: 180,
             verified: false,
             registeredAt: 1_700_000_000,
             reputationScore: 9,
             handle: handle,
-            avatar: AvatarConfig({
-                skinTone: 0,
-                hairStyle: 0,
-                hairColor: 0,
-                eyes: 0,
-                mouth: 0,
-                outfit: 0,
-                accessory: 0,
-                background: 0
-            })
+            imageUrl: imageUrl
         });
 
         return _generateSVG(1, p);
@@ -306,8 +310,8 @@ contract Series9IdentityTest is Test {
     function test_svgRendersPaymentHandle() public {
         Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
 
-        assertTrue(_contains(harness.exposedGenerateSvg("alice-1"), "@alice-1"));
-        assertTrue(_contains(harness.exposedGenerateSvg(""), "HANDLE PENDING"));
+        assertTrue(_contains(harness.exposedGenerateSvg("alice-1", ""), "@alice-1"));
+        assertTrue(_contains(harness.exposedGenerateSvg("", ""), "HANDLE PENDING"));
     }
 
     function test_hasIdentity() public {
@@ -363,33 +367,13 @@ contract Series9IdentityTest is Test {
         identity.mintIdentity(longName, "", Series9Identity.EntityType.Human, 100, 200);
     }
 
-    function test_customAvatarSeed() public {
+    function test_customAvatarSeedFeatureRemoved() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
         vm.prank(alice);
-        identity.setCustomAvatarSeed(tid, "special-pattern-42");
-        assertEq(identity.customAvatarSeed(tid), "special-pattern-42");
-    }
-
-    function test_customAvatarSeedTooLong() public {
-        vm.prank(alice);
-        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
-
-        vm.prank(alice);
-        vm.expectRevert(Series9Identity.AvatarSeedTooLong.selector);
-        identity.setCustomAvatarSeed(tid, "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmn");
-    }
-
-    function test_customAvatarSeedBlockedWhilePaused() public {
-        vm.prank(alice);
-        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
-
-        identity.pause();
-
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        identity.setCustomAvatarSeed(tid, "paused");
+        vm.expectRevert(Series9Identity.AvatarFeatureRemoved.selector);
+        identity.setCustomAvatarSeed(tid, "legacy-seed");
     }
 
     function test_transferUpdatesIdentityOwnerAndRewardAccounting() public {
@@ -758,12 +742,11 @@ contract Series9IdentityTest is Test {
 
     // ─────────────────── Signed payment ───────────────────
 
-    function _signPayPaymentRequest(
-        uint256 signerKey,
-        uint256 requestId,
-        uint256 nonce,
-        uint256 deadline
-    ) internal view returns (bytes memory sig) {
+    function _signPayPaymentRequest(uint256 signerKey, uint256 requestId, uint256 nonce, uint256 deadline)
+        internal
+        view
+        returns (bytes memory sig)
+    {
         bytes32 digest = identity.payPaymentRequestDigest(requestId, nonce, deadline);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
         sig = abi.encodePacked(r, s, v);
@@ -786,7 +769,7 @@ contract Series9IdentityTest is Test {
     }
 
     function test_payPaymentRequestWithSig_erc20Happy() public {
-        (uint256 signerKey, address signerAddr,, ) = _mintBobAndSignerWithHandles("dave");
+        (uint256 signerKey, address signerAddr,,) = _mintBobAndSignerWithHandles("dave");
 
         vm.prank(bob);
         uint256 requestId = identity.createPaymentRequest(
@@ -820,7 +803,7 @@ contract Series9IdentityTest is Test {
     }
 
     function test_payPaymentRequestWithSig_monHappy() public {
-        (uint256 signerKey, address signerAddr,, ) = _mintBobAndSignerWithHandles("erin");
+        (uint256 signerKey, address signerAddr,,) = _mintBobAndSignerWithHandles("erin");
 
         vm.prank(bob);
         uint256 requestId = identity.createPaymentRequest(
@@ -881,7 +864,7 @@ contract Series9IdentityTest is Test {
     }
 
     function test_payPaymentRequestWithSig_rejectsReplay() public {
-        (uint256 signerKey, address signerAddr,, ) = _mintBobAndSignerWithHandles("frank");
+        (uint256 signerKey, address signerAddr,,) = _mintBobAndSignerWithHandles("frank");
 
         vm.prank(bob);
         uint256 requestId =
@@ -925,7 +908,7 @@ contract Series9IdentityTest is Test {
     }
 
     function test_payPaymentRequestWithSig_rejectsExpired() public {
-        (uint256 signerKey, address signerAddr,, ) = _mintBobAndSignerWithHandles("hank");
+        (uint256 signerKey, address signerAddr,,) = _mintBobAndSignerWithHandles("hank");
 
         vm.prank(bob);
         uint256 requestId = identity.createPaymentRequest(
@@ -948,7 +931,7 @@ contract Series9IdentityTest is Test {
     }
 
     function test_payPaymentRequestWithSig_rejectsCancelled() public {
-        (uint256 signerKey, address signerAddr,, ) = _mintBobAndSignerWithHandles("ivy");
+        (uint256 signerKey, address signerAddr,,) = _mintBobAndSignerWithHandles("ivy");
 
         vm.prank(bob);
         uint256 requestId = identity.createPaymentRequest(
@@ -1019,192 +1002,363 @@ contract Series9IdentityTest is Test {
         return false;
     }
 
-    // ─────────────────── Avatar configuration ───────────────────
+    // ─────────────────── Photo URL metadata ───────────────────
 
-    function _baselineAvatar() internal pure returns (Series9IdentityRenderer.AvatarConfig memory) {
-        return Series9IdentityRenderer.AvatarConfig({
-            skinTone: 0,
-            hairStyle: 0,
-            hairColor: 0,
-            eyes: 0,
-            mouth: 0,
-            outfit: 0,
-            accessory: 0,
-            background: 0
-        });
+    function test_setImageUrlStoresAndEmits() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+        string memory imageUrl = "https://cdn.example.com/alice.png";
+
+        vm.expectEmit(true, false, false, true);
+        emit Series9Identity.ImageUrlUpdated(tid, imageUrl);
+
+        vm.prank(alice);
+        identity.setImageUrl(tid, imageUrl);
+
+        assertEq(identity.imageUrls(tid), imageUrl);
     }
 
-    function _readAvatar(uint256 tid) internal view returns (Series9IdentityRenderer.AvatarConfig memory cfg) {
-        (
-            cfg.skinTone,
-            cfg.hairStyle,
-            cfg.hairColor,
-            cfg.eyes,
-            cfg.mouth,
-            cfg.outfit,
-            cfg.accessory,
-            cfg.background
-        ) = identity.avatarConfig(tid);
-    }
-
-    function test_DefaultAvatarConfig_IsAllZeros() public {
+    function test_setImageUrlSupportsCommonSchemes() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
-        Series9IdentityRenderer.AvatarConfig memory cfg = _readAvatar(tid);
-        assertEq(cfg.skinTone, 0);
-        assertEq(cfg.hairStyle, 0);
-        assertEq(cfg.hairColor, 0);
-        assertEq(cfg.eyes, 0);
-        assertEq(cfg.mouth, 0);
-        assertEq(cfg.outfit, 0);
-        assertEq(cfg.accessory, 0);
-        assertEq(cfg.background, 0);
+        vm.startPrank(alice);
+        identity.setImageUrl(tid, "https://example.com/photo.png");
+        identity.setImageUrl(tid, "http://example.com/photo.png");
+        identity.setImageUrl(tid, "ipfs://bafybeigdyrzt5sfp");
+        identity.setImageUrl(tid, "ar://arweave-photo-id");
+        vm.stopPrank();
+
+        assertEq(identity.imageUrls(tid), "ar://arweave-photo-id");
     }
 
-    function test_SetAvatar_StoresValues() public {
+    function test_setImageUrlRejectsEmptyPayloadForEachSupportedScheme() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
-        Series9IdentityRenderer.AvatarConfig memory cfg = Series9IdentityRenderer.AvatarConfig({
-            skinTone: 1,
-            hairStyle: 2,
-            hairColor: 3,
-            eyes: 4,
-            mouth: 5,
-            outfit: 6,
-            accessory: 7,
-            background: 1
-        });
-
-        vm.prank(alice);
-        identity.setAvatar(tid, cfg);
-
-        Series9IdentityRenderer.AvatarConfig memory stored = _readAvatar(tid);
-        assertEq(stored.skinTone, 1);
-        assertEq(stored.hairStyle, 2);
-        assertEq(stored.hairColor, 3);
-        assertEq(stored.eyes, 4);
-        assertEq(stored.mouth, 5);
-        assertEq(stored.outfit, 6);
-        assertEq(stored.accessory, 7);
-        assertEq(stored.background, 1);
+        vm.startPrank(alice);
+        vm.expectRevert(Series9Identity.ImageUrlPayloadEmpty.selector);
+        identity.setImageUrl(tid, "https://");
+        vm.expectRevert(Series9Identity.ImageUrlPayloadEmpty.selector);
+        identity.setImageUrl(tid, "http://");
+        vm.expectRevert(Series9Identity.ImageUrlPayloadEmpty.selector);
+        identity.setImageUrl(tid, "ipfs://");
+        vm.expectRevert(Series9Identity.ImageUrlPayloadEmpty.selector);
+        identity.setImageUrl(tid, "ar://");
+        vm.stopPrank();
     }
 
-    function test_SetAvatar_RevertsForNonOwner() public {
+    function test_setImageUrlClearsToGeneratedMark() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
-        Series9IdentityRenderer.AvatarConfig memory cfg = _baselineAvatar();
-        cfg.skinTone = 3;
+        vm.startPrank(alice);
+        identity.setImageUrl(tid, "ipfs://photo-id");
+        identity.setImageUrl(tid, "");
+        vm.stopPrank();
+
+        assertEq(identity.imageUrls(tid), "");
+        Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
+        string memory svg = harness.exposedGenerateSvg("alice", "");
+        assertTrue(_contains(svg, ">S9</text>"));
+        assertFalse(_contains(svg, "<image href="));
+    }
+
+    function test_setImageUrlRevertsForNonOwner() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
         vm.prank(bob);
         vm.expectRevert(Series9Identity.NotTokenOwner.selector);
-        identity.setAvatar(tid, cfg);
+        identity.setImageUrl(tid, "https://example.com/photo.png");
     }
 
-    function test_SetAvatar_RevertsForOutOfRangeSlot() public {
+    function test_setImageUrlRevertsForNonexistentToken() public {
         vm.prank(alice);
-        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
-
-        Series9IdentityRenderer.AvatarConfig memory cfg = _baselineAvatar();
-        cfg.skinTone = 8;
-
-        vm.prank(alice);
-        vm.expectRevert(Series9Identity.InvalidAvatarSlot.selector);
-        identity.setAvatar(tid, cfg);
-
-        cfg = _baselineAvatar();
-        cfg.background = 8;
-        vm.prank(alice);
-        vm.expectRevert(Series9Identity.InvalidAvatarSlot.selector);
-        identity.setAvatar(tid, cfg);
+        vm.expectRevert(Series9Identity.NonexistentToken.selector);
+        identity.setImageUrl(999, "https://example.com/photo.png");
     }
 
-    function test_SetAvatar_EmitsEvent() public {
+    function test_setImageUrlBlockedWhilePaused() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
-
-        Series9IdentityRenderer.AvatarConfig memory cfg = _baselineAvatar();
-        cfg.hairStyle = 4;
-        cfg.accessory = 7;
-
-        vm.expectEmit(true, false, false, true);
-        emit Series9Identity.AvatarUpdated(tid, cfg);
-
-        vm.prank(alice);
-        identity.setAvatar(tid, cfg);
-    }
-
-    function test_SetAvatar_BlockedWhilePaused() public {
-        vm.prank(alice);
-        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
-
         identity.pause();
 
-        Series9IdentityRenderer.AvatarConfig memory cfg = _baselineAvatar();
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        identity.setAvatar(tid, cfg);
+        identity.setImageUrl(tid, "https://example.com/photo.png");
     }
 
-    function test_TokenURI_ChangesWhenAvatarChanges() public {
+    function test_setImageUrlRejectsInvalidScheme() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
-        string memory beforeUri = identity.tokenURI(tid);
+        vm.prank(alice);
+        vm.expectRevert(Series9Identity.InvalidImageUrlScheme.selector);
+        identity.setImageUrl(tid, "data:image/png;base64,abc");
+    }
 
-        Series9IdentityRenderer.AvatarConfig memory cfg = _baselineAvatar();
-        cfg.skinTone = 3;
-        cfg.hairStyle = 5;
-        cfg.background = 7;
+    function test_setImageUrlRejectsControlCharacter() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+        bytes memory rawUrl = bytes("https://example.com/photo.png");
+        rawUrl[8] = bytes1(0x0a);
 
         vm.prank(alice);
-        identity.setAvatar(tid, cfg);
+        vm.expectRevert(Series9Identity.ImageUrlContainsControlCharacter.selector);
+        identity.setImageUrl(tid, string(rawUrl));
+    }
+
+    function test_setImageUrlRejectsTooLong() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+        bytes memory tooLong = new bytes(identity.MAX_IMAGE_URL_BYTES() + 1);
+        for (uint256 i = 0; i < tooLong.length; i++) {
+            tooLong[i] = bytes1(0x61);
+        }
+
+        vm.prank(alice);
+        vm.expectRevert(Series9Identity.ImageUrlTooLong.selector);
+        identity.setImageUrl(tid, string(tooLong));
+    }
+
+    function test_tokenURIChangesAndEmbedsPhotoCardMetadata() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity("Alice", "Test bio", Series9Identity.EntityType.Human, 100, 200);
+
+        string memory beforeUri = identity.tokenURI(tid);
+        string memory imageUrl = "https://cdn.example.com/alice.png?size=large&v=2";
+
+        vm.prank(alice);
+        identity.setImageUrl(tid, imageUrl);
 
         string memory afterUri = identity.tokenURI(tid);
         assertTrue(keccak256(bytes(beforeUri)) != keccak256(bytes(afterUri)));
+
+        string memory metadata = _decodeDataUri(afterUri, "data:application/json;base64,");
+        assertTrue(_contains(metadata, '"image_url":"https://cdn.example.com/alice.png?size=large&v=2"'));
+        assertTrue(_contains(metadata, '"trait_type":"Image Source","value":"Custom Photo"'));
+
+        string memory svg = _decodeEmbeddedSvg(metadata);
+        assertTrue(_contains(svg, 'href="https://cdn.example.com/alice.png?size=large&amp;v=2"'));
+        assertTrue(_contains(svg, "#08080a"));
+        assertTrue(_contains(svg, "#cfae74"));
+        assertTrue(_contains(svg, "#f6f3ea"));
+        assertFalse(_contains(metadata, "Skin Tone"));
+        assertFalse(_contains(metadata, "Hair Style"));
+        assertFalse(_contains(svg, "avClip"));
     }
 
-    function test_TokenURI_IncludesAllSlotTraits() public {
-        vm.prank(alice);
-        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
-
-        string memory uri = identity.tokenURI(tid);
-        // tokenURI is base64-encoded JSON wrapped in data: URI — substring check the trait_type labels via base64.
-        // Easier: decode the metadata via inline base64 helper from the renderer harness if available.
-        // Since we expose _escapeJson but not base64 decode, just assert that calling tokenURI succeeds and
-        // returns a non-empty string for each slot.
-        assertGt(bytes(uri).length, 0);
-
+    function test_rendererHarnessUsesImageUrlAndModernPalette() public {
         Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
-        string memory svg = harness.exposedGenerateSvg("alice");
-        assertGt(bytes(svg).length, 0);
+        string memory svg = harness.exposedGenerateSvg("alice-1", "ar://photo-id");
+
+        assertTrue(_contains(svg, 'href="ar://photo-id"'));
+        assertTrue(_contains(svg, "#08080a"));
+        assertTrue(_contains(svg, "#cfae74"));
+        // Brassy gold is fully retired in favour of the champagne palette.
+        assertFalse(_contains(svg, "#d7ad55"));
+        assertFalse(_contains(svg, "Skin Tone"));
+        assertFalse(_contains(svg, "#e74c3c"));
     }
 
-    function test_AllSlotOptions_RenderWithoutRevert() public {
+    function test_metadataDescriptionUsesBio() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity(
+            "Alice", "Builder of \"on-chain\" things", Series9Identity.EntityType.Human, 100, 200
+        );
+
+        string memory metadata = _decodeDataUri(identity.tokenURI(tid), "data:application/json;base64,");
+        assertTrue(_contains(metadata, '"description":"Builder of \\"on-chain\\" things"'));
+
+        vm.prank(alice);
+        identity.updateProfile(tid, "Alice", "", 100, 200);
+
+        string memory emptyBioMetadata = _decodeDataUri(identity.tokenURI(tid), "data:application/json;base64,");
+        assertTrue(
+            _contains(
+                emptyBioMetadata,
+                '"description":"Series9 Identity premium black, white, and gold identity card"'
+            )
+        );
+    }
+
+    function test_svgRimRepeatsHandleAndTokenId() public {
+        Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
+        string memory withHandle = harness.exposedGenerateSvg("alice-1", "");
+
+        assertTrue(_contains(withHandle, '<path id="rim"'));
+        // Each lap carries its own textLength so the tiling period is exactly the
+        // 2148px rim; one lap chases the other, so the wrap has no seam.
+        assertTrue(_contains(withHandle, '<textPath href="#rim" startOffset="0" textLength="2148"'));
+        assertTrue(_contains(withHandle, '<textPath href="#rim" startOffset="2148" textLength="2148"'));
+        assertTrue(
+            _contains(withHandle, '<animate attributeName="startOffset" from="0" to="-2148" dur="60s" repeatCount="indefinite"/>')
+        );
+        assertTrue(
+            _contains(withHandle, '<animate attributeName="startOffset" from="2148" to="0" dur="60s" repeatCount="indefinite"/>')
+        );
+        assertFalse(_contains(withHandle, "4296"));
+        // Unit repeats around the whole rim, so it appears far more than once.
+        assertTrue(_contains(withHandle, unicode"@alice-1 · #1 · @alice-1 · #1 · @alice-1 · #1 · "));
+
+        string memory noHandle = harness.exposedGenerateSvg("", "");
+        assertTrue(_contains(noHandle, unicode"SERIES9 IDENTITY · #1 · SERIES9 IDENTITY · #1 · "));
+    }
+
+    function test_svgOmitsRedundantChrome() public {
+        Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
+        string memory generated = harness.exposedGenerateSvg("alice-1", "");
+        string memory photo = harness.exposedGenerateSvg("alice-1", "ar://photo-id");
+
+        // Token id lives in the rim ring and title, verification in the header badge.
+        assertFalse(_contains(generated, "TOKEN #"));
+        assertFalse(_contains(generated, "STATUS"));
+        assertFalse(_contains(generated, "TRUST STATE"));
+        assertFalse(_contains(generated, "ON-CHAIN"));
+        assertFalse(_contains(generated, "GENERATED MARK"));
+        assertFalse(_contains(photo, "CUSTOM PHOTO"));
+        assertFalse(_contains(generated, "VERIFIED IDENTITY PROTOCOL"));
+        // The card carries no horizontal rules; whitespace does the separating.
+        assertFalse(_contains(generated, "<line x1="));
+        assertTrue(_contains(generated, ">IDENTITY CARD</text>"));
+    }
+
+    function test_svgWrapsBioAcrossThreeLines() public {
+        Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
+
+        // 124 bytes: wraps onto all three lines, breaking only at spaces.
+        string memory svg = harness.exposedGenerateSvgWithBio(
+            "Series9 protocol builder shipping on-chain identity, payment handles and autonomous agent wallets on Monad every day"
+        );
+        assertTrue(_contains(svg, '<text x="290" y="238">Series9 protocol builder shipping on-chain</text>'));
+        assertTrue(_contains(svg, '<text x="290" y="260">identity, payment handles and autonomous agent</text>'));
+        assertTrue(_contains(svg, '<text x="290" y="282">wallets on Monad every day</text>'));
+
+        // Korean has no spaces to break on, so lines hard-cut on UTF-8 boundaries.
+        string memory korean = harness.exposedGenerateSvgWithBio(
+            unicode"시리즈나인아이덴티티는온체인신원과결제핸들과자율에이전트지갑을제공합니다"
+        );
+        assertTrue(_contains(korean, unicode'<text x="290" y="238">시리즈나인아이덴티티는온체인신</text>'));
+        assertTrue(_contains(korean, unicode'<text x="290" y="260">원과결제핸들과자율에이전트지갑</text>'));
+        assertTrue(_contains(korean, unicode'<text x="290" y="282">을제공합니다</text>'));
+
+        // Short bios leave the extra lines empty rather than repeating text.
+        string memory short_ = harness.exposedGenerateSvgWithBio("hi");
+        assertTrue(_contains(short_, '<text x="290" y="238">hi</text><text x="290" y="260"></text>'));
+    }
+
+    function test_svgStatsAreSingleLineRepAndSince() public {
+        Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
+        string memory svg = harness.exposedGenerateSvg("alice-1", "");
+
+        assertTrue(_contains(svg, ">REP </tspan>9</text>"));
+        assertTrue(_contains(svg, ">SINCE </tspan>2023</text>"));
+        assertFalse(_contains(svg, "REPUTATION"));
+        assertFalse(_contains(svg, "PROTOCOL SCORE"));
+        assertFalse(_contains(svg, "REGISTERED"));
+        assertFalse(_contains(svg, "ESTABLISHED YEAR"));
+    }
+
+    function test_svgBadgesShareRightContentEdge() public {
+        Series9IdentityRendererHarness harness = new Series9IdentityRendererHarness();
+        string memory human = harness.exposedGenerateSvg("alice-1", "");
+
+        // HUMAN pill is 84 wide, AI pill 58; both end 10px before the verified mark at x=652.
+        assertTrue(_contains(human, 'transform="translate(558 40)"'));
+        assertTrue(_contains(human, 'transform="translate(652 40)"'));
+        assertFalse(_contains(human, "cx=\"666\""));
+    }
+
+    function test_avatarSettersRevertWithFeatureRemoved() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+        Series9IdentityRenderer.AvatarConfig memory legacyConfig;
 
-        for (uint8 slot = 0; slot < 8; slot++) {
-            for (uint8 v = 0; v < 8; v++) {
-                Series9IdentityRenderer.AvatarConfig memory cfg = _baselineAvatar();
-                if (slot == 0) cfg.skinTone = v;
-                else if (slot == 1) cfg.hairStyle = v;
-                else if (slot == 2) cfg.hairColor = v;
-                else if (slot == 3) cfg.eyes = v;
-                else if (slot == 4) cfg.mouth = v;
-                else if (slot == 5) cfg.outfit = v;
-                else if (slot == 6) cfg.accessory = v;
-                else cfg.background = v;
+        vm.prank(alice);
+        vm.expectRevert(Series9Identity.AvatarFeatureRemoved.selector);
+        identity.setAvatar(tid, legacyConfig);
+    }
 
-                vm.prank(alice);
-                identity.setAvatar(tid, cfg);
-
-                string memory uri = identity.tokenURI(tid);
-                assertGt(bytes(uri).length, 0);
-            }
+    function _decodeDataUri(string memory uri, string memory prefix) internal pure returns (string memory) {
+        bytes memory rawUri = bytes(uri);
+        bytes memory rawPrefix = bytes(prefix);
+        assert(rawUri.length >= rawPrefix.length);
+        for (uint256 i = 0; i < rawPrefix.length; i++) {
+            assert(rawUri[i] == rawPrefix[i]);
         }
+
+        bytes memory encoded = new bytes(rawUri.length - rawPrefix.length);
+        for (uint256 i = rawPrefix.length; i < rawUri.length; i++) {
+            encoded[i - rawPrefix.length] = rawUri[i];
+        }
+        return _base64Decode(string(encoded));
+    }
+
+    function _decodeEmbeddedSvg(string memory metadata) internal pure returns (string memory) {
+        string memory marker = '"image":"data:image/svg+xml;base64,';
+        bytes memory rawMetadata = bytes(metadata);
+        bytes memory rawMarker = bytes(marker);
+        uint256 start = _indexOf(rawMetadata, rawMarker);
+        assert(start != type(uint256).max);
+        start += rawMarker.length;
+
+        uint256 end = start;
+        while (end < rawMetadata.length && rawMetadata[end] != bytes1(0x22)) {
+            end++;
+        }
+        bytes memory encoded = new bytes(end - start);
+        for (uint256 i = start; i < end; i++) {
+            encoded[i - start] = rawMetadata[i];
+        }
+        return _base64Decode(string(encoded));
+    }
+
+    function _base64Decode(string memory encoded) internal pure returns (string memory) {
+        bytes memory source = bytes(encoded);
+        if (source.length == 0) return "";
+        assert(source.length % 4 == 0);
+
+        uint256 padding;
+        if (source[source.length - 1] == bytes1(0x3d)) padding++;
+        if (source[source.length - 2] == bytes1(0x3d)) padding++;
+        bytes memory decoded = new bytes((source.length / 4) * 3 - padding);
+        uint256 outputIndex;
+
+        for (uint256 i = 0; i < source.length; i += 4) {
+            uint24 chunk = (uint24(_base64Value(source[i])) << 18) | (uint24(_base64Value(source[i + 1])) << 12)
+                | (uint24(_base64Value(source[i + 2])) << 6) | uint24(_base64Value(source[i + 3]));
+
+            if (outputIndex < decoded.length) decoded[outputIndex++] = bytes1(uint8(chunk >> 16));
+            if (outputIndex < decoded.length) decoded[outputIndex++] = bytes1(uint8(chunk >> 8));
+            if (outputIndex < decoded.length) decoded[outputIndex++] = bytes1(uint8(chunk));
+        }
+        return string(decoded);
+    }
+
+    function _base64Value(bytes1 value) internal pure returns (uint8) {
+        uint8 c = uint8(value);
+        if (c >= 0x41 && c <= 0x5a) return c - 0x41;
+        if (c >= 0x61 && c <= 0x7a) return c - 0x61 + 26;
+        if (c >= 0x30 && c <= 0x39) return c - 0x30 + 52;
+        if (c == 0x2b) return 62;
+        if (c == 0x2f) return 63;
+        return 0;
+    }
+
+    function _indexOf(bytes memory haystack, bytes memory needle) internal pure returns (uint256) {
+        if (needle.length == 0 || needle.length > haystack.length) return type(uint256).max;
+        for (uint256 i = 0; i <= haystack.length - needle.length; i++) {
+            bool found = true;
+            for (uint256 j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    found = false;
+                    break;
+                }
+            }
+            if (found) return i;
+        }
+        return type(uint256).max;
     }
 }
 
