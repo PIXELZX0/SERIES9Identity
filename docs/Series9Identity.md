@@ -106,7 +106,7 @@ struct AvatarConfig {
 - 위 [가상 지갑 + 정체성 전송](#가상-지갑-smart-account-wallet--정체성-전송-escrow) 섹션 참조
 
 ### Storage gap
-- 현재 소스의 `avatarConfig` + `imageUrls` + `ownerStakedBalance`를 layout 끝에 append한 뒤 `uint256[26] private __gap`을 유지합니다.
+- 현재 소스의 `avatarConfig` + `imageUrls` + `ownerStakedBalance` + `moderators`를 layout 끝에 append한 뒤 `uint256[25] private __gap`을 유지합니다.
 
 ## Initialize
 
@@ -150,8 +150,20 @@ struct AvatarConfig {
 | `setImageUrl(tokenId, imageUrl)` | whenNotPaused, 토큰 소유자 | 빈 문자열은 photo를 지우고 generated mark로 복원. 그 외에는 최대 `MAX_IMAGE_URL_BYTES` byte, ASCII control character 금지, `https://`, `http://`, `ipfs://`, `ar://` 중 하나의 정확한 scheme과 비어 있지 않은 payload 필요. `imageUrls[tokenId]`에 저장 후 `ImageUrlUpdated` emit |
 | `setAvatar(tokenId, AvatarConfig)` | whenNotPaused | **disabled**. pause gate를 통과하면 `AvatarFeatureRemoved` revert; legacy ABI/storage 호환성만 유지하며 active renderer에서 무시 |
 | `setCustomAvatarSeed(tokenId, seed)` | whenNotPaused | **disabled**. pause gate를 통과하면 `AvatarFeatureRemoved` revert; legacy storage/ABI 호환성만 유지하며 active renderer에서 무시 |
-| `verify(tokenId, bool status)` | onlyOwner | 프로필 `verified` flag 토글 |
-| `setReputationScore(tokenId, newScore)` | onlyOwner | 1~`MAX_REPUTATION_SCORE`. 변경 전 owner의 보상 정산(`_accrueNFTReward`) 후 `totalReputationScore` 재계산 |
+| `verify(tokenId, bool status)` | **onlyOwnerOrModerator** | 프로필 `verified` flag 토글 |
+| `setReputationScore(tokenId, newScore)` | **onlyOwnerOrModerator** | 1~`MAX_REPUTATION_SCORE`. 변경 전 owner의 보상 정산(`_accrueNFTReward`) 후 `totalReputationScore` 재계산 |
+| `setModerator(address, bool allowed)` | onlyOwner | moderator 지정/해제. zero address 거부. `ModeratorUpdated` emit |
+| `moderators(address)` view | — | moderator 여부 |
+
+### Moderator 권한 범위
+
+Identity 심사(인증·평판)만 owner가 지정한 moderator에게 위임됩니다. moderator가 아닌 계정은 `NotModerator`로 리버트하고, owner는 항상 통과합니다.
+
+**moderator가 할 수 있는 것**: `verify`, `setReputationScore` (2개뿐)
+
+**owner 전용으로 남는 것**: `setModerator`, 수수료(`setAIMintFee`/`setHumanMintFee`), 스테이킹(`setStakingContract`/`ownerStake`/`ownerUnstake`/`ownerClaimUnstaked`), `pause`/`unpause`, 지갑 impl 허용목록, `upgradeToAndCall`, `transferOwnership`
+
+`setReputationScore`는 보상 분배 가중치를 바꾸므로, moderator는 SER9를 직접 옮기지는 못해도 **향후 보상 배분 비율에는 영향을 줄 수 있습니다**(상한은 `MAX_REPUTATION_SCORE`). 신뢰 수준에 맞춰 지정하세요.
 
 ### Photo URL 메타데이터 동작
 
@@ -392,7 +404,8 @@ struct IdentityTransfer { address from; address to; uint64 acceptedAt; TransferS
 | `payToHandle` (ERC20 / MON) | 완전 구현 | identity 보유자만 |
 | 결제 요청 생성/지불/취소 | 완전 구현 | 만기 자동 Expired 처리 |
 | EIP-712 서명 위임 결제 | 완전 구현 | nonce 기반 재사용 방지 |
-| Owner 어드민 (수수료/staking/verify/reputation/pause) | 완전 구현 | |
+| Owner 어드민 (수수료/staking/pause/업그레이드) | 완전 구현 | |
+| Moderator 위임 (verify/reputation) | 완전 구현 | owner가 `setModerator`로 지정/해제 |
 | UUPS 업그레이드 | 완전 구현 | `_authorizeUpgrade onlyOwner` |
 | `InsufficientMintAllowance` / `InvalidHue` 에러 | **선언만**, 실제 호출 경로 없음 | 향후 사용 가능성 위해 보존 |
 
@@ -408,7 +421,7 @@ struct IdentityTransfer { address from; address to; uint64 acceptedAt; TransferS
 
 ## Storage gap
 
-현재 `Series9Identity.sol`은 layout 끝에 보존된 `avatarConfig` mapping, active `imageUrls` mapping, `ownerStakedBalance`를 append한 뒤 `uint256[26] private __gap`을 사용합니다. `ownerStakedBalance`는 gap에서 한 슬롯을 소비하므로 기존 필드는 이동하지 않습니다. `avatarConfig`는 legacy storage/ABI 호환성용이며 active renderer에서 읽지 않고, `imageUrls`만 photo metadata에 사용됩니다.
+현재 `Series9Identity.sol`은 layout 끝에 보존된 `avatarConfig` mapping, active `imageUrls` mapping, `ownerStakedBalance`, `moderators`를 append한 뒤 `uint256[25] private __gap`을 사용합니다. `ownerStakedBalance`와 `moderators`는 각각 gap에서 한 슬롯씩 소비하므로 기존 필드는 이동하지 않습니다. `avatarConfig`는 legacy storage/ABI 호환성용이며 active renderer에서 읽지 않고, `imageUrls`만 photo metadata에 사용됩니다.
 
 ## 운영 노트
 
