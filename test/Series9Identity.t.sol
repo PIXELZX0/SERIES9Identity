@@ -1176,10 +1176,7 @@ contract Series9IdentityTest is Test {
 
         string memory emptyBioMetadata = _decodeDataUri(identity.tokenURI(tid), "data:application/json;base64,");
         assertTrue(
-            _contains(
-                emptyBioMetadata,
-                '"description":"Series9 Identity premium black, white, and gold identity card"'
-            )
+            _contains(emptyBioMetadata, '"description":"Series9 Identity premium black, white, and gold identity card"')
         );
     }
 
@@ -1193,10 +1190,16 @@ contract Series9IdentityTest is Test {
         assertTrue(_contains(withHandle, '<textPath href="#rim" startOffset="0" textLength="2148"'));
         assertTrue(_contains(withHandle, '<textPath href="#rim" startOffset="2148" textLength="2148"'));
         assertTrue(
-            _contains(withHandle, '<animate attributeName="startOffset" from="0" to="-2148" dur="60s" repeatCount="indefinite"/>')
+            _contains(
+                withHandle,
+                '<animate attributeName="startOffset" from="0" to="-2148" dur="60s" repeatCount="indefinite"/>'
+            )
         );
         assertTrue(
-            _contains(withHandle, '<animate attributeName="startOffset" from="2148" to="0" dur="60s" repeatCount="indefinite"/>')
+            _contains(
+                withHandle,
+                '<animate attributeName="startOffset" from="2148" to="0" dur="60s" repeatCount="indefinite"/>'
+            )
         );
         assertFalse(_contains(withHandle, "4296"));
         // Unit repeats around the whole rim, so it appears far more than once.
@@ -1204,6 +1207,81 @@ contract Series9IdentityTest is Test {
 
         string memory noHandle = harness.exposedGenerateSvg("", "");
         assertTrue(_contains(noHandle, unicode"SERIES9 IDENTITY · #1 · SERIES9 IDENTITY · #1 · "));
+    }
+
+    function test_ownerStakeSeedsStakingPosition() public {
+        MockStaking staking = MockStaking(identity.stakingContract());
+        uint256 stakedBefore = staking.stakedAmount(address(identity));
+
+        ser9.approve(address(identity), 40 ether);
+        identity.ownerStake(40 ether);
+
+        assertEq(identity.ownerStakedBalance(), 40 ether);
+        assertEq(staking.stakedAmount(address(identity)), stakedBefore + 40 ether);
+        // Everything is forwarded on; nothing is parked in the identity contract.
+        assertEq(ser9.balanceOf(address(identity)), 0);
+    }
+
+    function test_ownerStakeRejectsNonOwnerAndZero() public {
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", alice));
+        identity.ownerStake(1 ether);
+
+        vm.expectRevert(Series9Identity.ZeroStakeAmount.selector);
+        identity.ownerStake(0);
+    }
+
+    function test_ownerUnstakeCannotReachMintFees() public {
+        // A mint stakes HUMAN_FEE that must stay staked forever.
+        vm.prank(alice);
+        identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+
+        ser9.approve(address(identity), 10 ether);
+        identity.ownerStake(10 ether);
+
+        MockStaking staking = MockStaking(identity.stakingContract());
+        assertEq(staking.stakedAmount(address(identity)), HUMAN_FEE + 10 ether);
+        assertEq(identity.ownerStakedBalance(), 10 ether);
+
+        // Only the seeded 10 is reachable, not the mint fee sitting in the same position.
+        vm.expectRevert(Series9Identity.ExceedsOwnerStake.selector);
+        identity.ownerUnstake(10 ether + 1);
+
+        identity.ownerUnstake(10 ether);
+        assertEq(identity.ownerStakedBalance(), 0);
+        assertEq(staking.stakedAmount(address(identity)), HUMAN_FEE);
+
+        vm.expectRevert(Series9Identity.ExceedsOwnerStake.selector);
+        identity.ownerUnstake(1);
+    }
+
+    function test_ownerClaimUnstakedForwardsToOwner() public {
+        ser9.approve(address(identity), 25 ether);
+        identity.ownerStake(25 ether);
+
+        uint256 requestId = identity.ownerUnstake(25 ether);
+        uint256 ownerBalanceBefore = ser9.balanceOf(owner);
+
+        identity.ownerClaimUnstaked(requestId);
+
+        assertEq(ser9.balanceOf(owner), ownerBalanceBefore + 25 ether);
+        // Nothing is left behind in the balance claimNFTRewards pays out of.
+        assertEq(ser9.balanceOf(address(identity)), 0);
+    }
+
+    function test_ownerUnstakeWorksWhilePaused() public {
+        ser9.approve(address(identity), 5 ether);
+        identity.ownerStake(5 ether);
+
+        identity.pause();
+
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        identity.ownerStake(1 ether);
+
+        // Recovery must stay open while paused.
+        uint256 requestId = identity.ownerUnstake(5 ether);
+        identity.ownerClaimUnstaked(requestId);
+        assertEq(identity.ownerStakedBalance(), 0);
     }
 
     function test_svgOmitsRedundantChrome() public {
@@ -1239,8 +1317,12 @@ contract Series9IdentityTest is Test {
         string memory korean = harness.exposedGenerateSvgWithBio(
             unicode"시리즈나인아이덴티티는온체인신원과결제핸들과자율에이전트지갑을제공합니다"
         );
-        assertTrue(_contains(korean, unicode'<text x="290" y="238">시리즈나인아이덴티티는온체인신</text>'));
-        assertTrue(_contains(korean, unicode'<text x="290" y="260">원과결제핸들과자율에이전트지갑</text>'));
+        assertTrue(
+            _contains(korean, unicode'<text x="290" y="238">시리즈나인아이덴티티는온체인신</text>')
+        );
+        assertTrue(
+            _contains(korean, unicode'<text x="290" y="260">원과결제핸들과자율에이전트지갑</text>')
+        );
         assertTrue(_contains(korean, unicode'<text x="290" y="282">을제공합니다</text>'));
 
         // Short bios leave the extra lines empty rather than repeating text.
@@ -1388,6 +1470,30 @@ contract MockStaking {
         uint256 reward = rewards[msg.sender];
         rewards[msg.sender] = 0;
         ser9.transfer(msg.sender, reward);
+    }
+
+    struct UnstakeRequest {
+        uint256 amount;
+        bool claimed;
+    }
+
+    mapping(address => uint256) public ser9UnstakeRequestCount;
+    mapping(address => mapping(uint256 => UnstakeRequest)) public unstakeRequests;
+
+    function unstake(uint256 amount) external {
+        require(stakedAmount[msg.sender] >= amount, "insufficient stake");
+        stakedAmount[msg.sender] -= amount;
+        totalStaked -= amount;
+
+        uint256 requestId = ser9UnstakeRequestCount[msg.sender]++;
+        unstakeRequests[msg.sender][requestId] = UnstakeRequest({amount: amount, claimed: false});
+    }
+
+    function claimUnstaked(uint256 requestId) external {
+        UnstakeRequest storage request = unstakeRequests[msg.sender][requestId];
+        require(!request.claimed, "already claimed");
+        request.claimed = true;
+        ser9.transfer(msg.sender, request.amount);
     }
 }
 

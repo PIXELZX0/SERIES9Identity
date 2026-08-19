@@ -18,6 +18,9 @@ import {Series9IdentityWallet} from "./Series9IdentityWallet.sol";
 /// @notice Interface for Series9Staking — stake() + reward claiming
 interface ISeries9Staking {
     function stake(uint256 amount) external;
+    function unstake(uint256 amount) external;
+    function claimUnstaked(uint256 requestId) external;
+    function ser9UnstakeRequestCount(address account) external view returns (uint256);
     function claimRewards() external;
     function rewards(address account) external view returns (uint256);
     function stakedBalance(address account) external view returns (uint256);
@@ -165,6 +168,12 @@ contract Series9Identity is
     event IdentityStaked(address indexed user, uint256 amount);
     /// @notice Emitted when staking rewards are collected from the staking contract
     event StakingRewardsCollected(uint256 amount);
+    /// @notice Emitted when the owner seeds SER9 into the protocol's staking position
+    event OwnerStaked(uint256 amount, uint256 ownerStakedTotal);
+    /// @notice Emitted when the owner queues an unstake of their own seeded SER9
+    event OwnerUnstakeRequested(uint256 requestId, uint256 amount, uint256 ownerStakedTotal);
+    /// @notice Emitted when a matured owner unstake request is withdrawn to the owner
+    event OwnerUnstakeClaimed(uint256 requestId, uint256 amount);
     /// @notice Emitted when an NFT holder claims their reward share
     event NFTRewardClaimed(address indexed user, uint256 amount);
     /// @notice Emitted when a token's reputation score is changed
@@ -234,6 +243,8 @@ contract Series9Identity is
     error ZeroSer9Address();
     error InvalidStakingContract();
     error StakingFailed();
+    error ZeroStakeAmount();
+    error ExceedsOwnerStake();
     error NotNFTHolder();
     error NoNFTRewards();
     error InvalidReputationScore();
@@ -752,6 +763,60 @@ contract Series9Identity is
         address prev = stakingContract;
         stakingContract = newStaking;
         emit StakingContractUpdated(prev, newStaking);
+    }
+
+    /// @notice Seed SER9 into the protocol's staking position so NFT holders earn from a larger stake.
+    /// @dev Pulls SER9 from the caller and stakes it exactly the way a mint fee is staked. The amount is
+    ///      tracked in {ownerStakedBalance} so {ownerUnstake} can never reach the mint fees, which stay
+    ///      staked permanently by design.
+    function ownerStake(uint256 amount) external onlyOwner whenNotPaused nonReentrant {
+        if (amount == 0) revert ZeroStakeAmount();
+
+        uint256 balanceBefore = ser9.balanceOf(address(this));
+
+        ser9.safeTransferFrom(msg.sender, address(this), amount);
+        ser9.forceApprove(stakingContract, amount);
+        ISeries9Staking(stakingContract).stake(amount);
+        ser9.forceApprove(stakingContract, 0);
+
+        if (ser9.balanceOf(address(this)) > balanceBefore) revert StakingFailed();
+
+        ownerStakedBalance += amount;
+
+        emit OwnerStaked(amount, ownerStakedBalance);
+    }
+
+    /// @notice Queue an unstake of owner-seeded SER9. Staking enforces its own epoch delay before the
+    ///         request can be withdrawn with {ownerClaimUnstaked}.
+    /// @dev Deliberately not gated on {whenNotPaused}: a paused contract must still be able to recover
+    ///      the seeded funds.
+    function ownerUnstake(uint256 amount) external onlyOwner nonReentrant returns (uint256 requestId) {
+        if (amount == 0) revert ZeroStakeAmount();
+        if (amount > ownerStakedBalance) revert ExceedsOwnerStake();
+
+        ownerStakedBalance -= amount;
+
+        ISeries9Staking staking = ISeries9Staking(stakingContract);
+        staking.unstake(amount);
+        requestId = staking.ser9UnstakeRequestCount(address(this)) - 1;
+
+        emit OwnerUnstakeRequested(requestId, amount, ownerStakedBalance);
+    }
+
+    /// @notice Withdraw a matured unstake request straight through to the owner.
+    /// @dev Staking releases the SER9 to this contract, so it is forwarded on in the same transaction:
+    ///      leaving it here would sit in the same balance {claimNFTRewards} pays out of.
+    function ownerClaimUnstaked(uint256 requestId) external onlyOwner nonReentrant {
+        uint256 balanceBefore = ser9.balanceOf(address(this));
+
+        ISeries9Staking(stakingContract).claimUnstaked(requestId);
+
+        uint256 received = ser9.balanceOf(address(this)) - balanceBefore;
+        if (received > 0) {
+            ser9.safeTransfer(msg.sender, received);
+        }
+
+        emit OwnerUnstakeClaimed(requestId, received);
     }
 
     function pause() external onlyOwner {
@@ -1504,5 +1569,9 @@ contract Series9Identity is
     // avatarConfig or any preceding field; this consumes exactly one slot from the upgrade gap.
     mapping(uint256 => string) public imageUrls;
 
-    uint256[27] private __gap;
+    /// @notice SER9 the owner seeded into the staking position, tracked separately from mint fees.
+    ///         Mint fees stay staked forever by design; only this balance may be unstaked.
+    uint256 public ownerStakedBalance;
+
+    uint256[26] private __gap;
 }
