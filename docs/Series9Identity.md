@@ -106,7 +106,7 @@ struct AvatarConfig {
 - 위 [가상 지갑 + 정체성 전송](#가상-지갑-smart-account-wallet--정체성-전송-escrow) 섹션 참조
 
 ### Storage gap
-- 현재 소스의 `avatarConfig` + `imageUrls`를 layout 끝에 append한 뒤 `uint256[27] private __gap`을 유지합니다.
+- 현재 소스의 `avatarConfig` + `imageUrls` + `ownerStakedBalance`를 layout 끝에 append한 뒤 `uint256[26] private __gap`을 유지합니다.
 
 ## Initialize
 
@@ -241,7 +241,13 @@ handle 정규화 규칙(`_legacyHandleSlug`):
 |------|------|
 | `setAIMintFee(uint256)` / `setHumanMintFee(uint256)` | 수수료 변경 |
 | `setStakingContract(address)` | staking 컨트랙트 주소 갱신 (코드 존재 검증) |
+| `ownerStake(uint256)` | onlyOwner, whenNotPaused, nonReentrant. 호출자에게서 SER9를 받아 mint 수수료와 **동일 경로**로 스테이킹. `ownerStakedBalance`에 가산. `OwnerStaked` emit |
+| `ownerUnstake(uint256)` → `requestId` | onlyOwner, nonReentrant. `ownerStakedBalance` 한도 내에서만 unstake 요청. 초과 시 `ExceedsOwnerStake`. `OwnerUnstakeRequested` emit |
+| `ownerClaimUnstaked(uint256 requestId)` | onlyOwner, nonReentrant. staking의 에포크 지연 경과 후 회수. 받은 SER9를 **같은 tx에서 owner로 전달**. `OwnerUnstakeClaimed` emit |
+| `ownerStakedBalance()` view | owner가 시딩한 스테이킹 잔액 (mint 수수료 제외) |
 | `pause()` / `unpause()` | OZ Pausable |
+
+**mint 수수료는 영구 락, owner 시딩분만 회수 가능.** 둘 다 `Series9Staking`의 같은 `stakedBalance[Identity]` 포지션에 쌓이므로, `ownerStakedBalance`로 owner 몫을 따로 추적해 `ownerUnstake`가 수수료에 손대지 못하게 막습니다. `ownerUnstake`/`ownerClaimUnstaked`는 일부러 `whenNotPaused`를 걸지 않았습니다 — pause 상태에서도 시딩 자금은 회수 가능해야 합니다. `ownerClaimUnstaked`가 SER9를 컨트랙트에 두지 않고 즉시 owner로 넘기는 이유는, 그 잔액이 `claimNFTRewards`의 출금 재원과 같은 잔액이기 때문입니다.
 
 ## 내부 동작
 
@@ -394,14 +400,15 @@ struct IdentityTransfer { address from; address to; uint64 acceptedAt; TransferS
 
 - **SER9Token**: mint 수수료 입금 + reward 분배 토큰
 - **Series9Staking**:
-  - `stake(amount)` — mint 흐름에서 자동 호출
+  - `stake(amount)` — mint 흐름 + `ownerStake`에서 호출
+  - `unstake(amount)` / `claimUnstaked(requestId)` / `ser9UnstakeRequestCount(address)` — owner 시딩분 회수 경로
   - `claimRewards()` — `collectStakingRewards`에서 호출
   - `rewards(address(this))` view — `pendingStakingRewards`에서 노출
 - **Series9IdentityRenderer**: base contract로 상속, `_renderTokenURI(...)`만 호출
 
 ## Storage gap
 
-현재 `Series9Identity.sol`은 layout 끝에 보존된 `avatarConfig` mapping과 active `imageUrls` mapping을 append한 뒤 `uint256[27] private __gap`을 사용합니다. `avatarConfig`는 legacy storage/ABI 호환성용이며 active renderer에서 읽지 않고, `imageUrls`만 photo metadata에 사용됩니다.
+현재 `Series9Identity.sol`은 layout 끝에 보존된 `avatarConfig` mapping, active `imageUrls` mapping, `ownerStakedBalance`를 append한 뒤 `uint256[26] private __gap`을 사용합니다. `ownerStakedBalance`는 gap에서 한 슬롯을 소비하므로 기존 필드는 이동하지 않습니다. `avatarConfig`는 legacy storage/ABI 호환성용이며 active renderer에서 읽지 않고, `imageUrls`만 photo metadata에 사용됩니다.
 
 ## 운영 노트
 
