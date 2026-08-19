@@ -277,12 +277,12 @@ contract Series9IdentityTest is Test {
         identity.verify(999, true);
     }
 
-    function test_verifyNotOwner() public {
+    function test_verifyNotOwnerOrModerator() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
         vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", bob));
+        vm.expectRevert(Series9Identity.NotModerator.selector);
         identity.verify(tid, true);
     }
 
@@ -460,12 +460,12 @@ contract Series9IdentityTest is Test {
         assertEq(identity.pendingNFTRewards(bob), 65 ether);
     }
 
-    function test_nonOwnerCannotUpdateReputationScore() public {
+    function test_nonOwnerOrModeratorCannotUpdateReputationScore() public {
         vm.prank(alice);
         uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
 
         vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", bob));
+        vm.expectRevert(Series9Identity.NotModerator.selector);
         identity.setReputationScore(tid, 20);
     }
 
@@ -1207,6 +1207,74 @@ contract Series9IdentityTest is Test {
 
         string memory noHandle = harness.exposedGenerateSvg("", "");
         assertTrue(_contains(noHandle, unicode"SERIES9 IDENTITY · #1 · SERIES9 IDENTITY · #1 · "));
+    }
+
+    function test_moderatorCanVerifyAndSetReputation() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+
+        // Not a moderator yet.
+        vm.prank(charlie);
+        vm.expectRevert(Series9Identity.NotModerator.selector);
+        identity.verify(tid, true);
+
+        identity.setModerator(charlie, true);
+        assertTrue(identity.moderators(charlie));
+
+        vm.startPrank(charlie);
+        identity.verify(tid, true);
+        identity.setReputationScore(tid, 42);
+        vm.stopPrank();
+
+        (,,,,, bool verified,) = identity.profiles(tid);
+        assertTrue(verified);
+        assertEq(identity.reputationScores(tid), 42);
+
+        // The owner keeps both powers.
+        identity.verify(tid, false);
+        identity.setReputationScore(tid, 7);
+        assertEq(identity.reputationScores(tid), 7);
+    }
+
+    function test_moderatorRightsAreRevocableAndOwnerOnly() public {
+        vm.prank(alice);
+        uint256 tid = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+
+        // Only the owner hands out moderation.
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", bob));
+        identity.setModerator(charlie, true);
+
+        identity.setModerator(charlie, true);
+        identity.setModerator(charlie, false);
+
+        vm.prank(charlie);
+        vm.expectRevert(Series9Identity.NotModerator.selector);
+        identity.verify(tid, true);
+    }
+
+    function test_moderatorCannotTouchFundsOrUpgrades() public {
+        identity.setModerator(charlie, true);
+        bytes memory unauthorized = abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", charlie);
+        // Deployed outside the prank: expectRevert would otherwise bind to this CREATE.
+        Series9Identity newImpl = new Series9Identity();
+
+        vm.startPrank(charlie);
+        vm.expectRevert(unauthorized);
+        identity.ownerStake(1 ether);
+        vm.expectRevert(unauthorized);
+        identity.ownerUnstake(1 ether);
+        vm.expectRevert(unauthorized);
+        identity.setHumanMintFee(1 ether);
+        vm.expectRevert(unauthorized);
+        identity.setStakingContract(address(this));
+        vm.expectRevert(unauthorized);
+        identity.pause();
+        vm.expectRevert(unauthorized);
+        identity.setModerator(bob, true);
+        vm.expectRevert(unauthorized);
+        identity.upgradeToAndCall(address(newImpl), "");
+        vm.stopPrank();
     }
 
     function test_ownerStakeSeedsStakingPosition() public {

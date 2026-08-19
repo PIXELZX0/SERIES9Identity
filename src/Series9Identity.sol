@@ -168,6 +168,8 @@ contract Series9Identity is
     event IdentityStaked(address indexed user, uint256 amount);
     /// @notice Emitted when staking rewards are collected from the staking contract
     event StakingRewardsCollected(uint256 amount);
+    /// @notice Emitted when a moderator is granted or revoked
+    event ModeratorUpdated(address indexed account, bool allowed);
     /// @notice Emitted when the owner seeds SER9 into the protocol's staking position
     event OwnerStaked(uint256 amount, uint256 ownerStakedTotal);
     /// @notice Emitted when the owner queues an unstake of their own seeded SER9
@@ -244,6 +246,7 @@ contract Series9Identity is
     error InvalidStakingContract();
     error StakingFailed();
     error ZeroStakeAmount();
+    error NotModerator();
     error ExceedsOwnerStake();
     error NotNFTHolder();
     error NoNFTRewards();
@@ -721,13 +724,26 @@ contract Series9Identity is
 
     // ─────────────────── Admin ───────────────────
 
-    function verify(uint256 tokenId, bool status) external onlyOwner {
+    /// @dev Identity moderation only. Every other owner-gated function keeps `onlyOwner`.
+    modifier onlyOwnerOrModerator() {
+        if (msg.sender != owner() && !moderators[msg.sender]) revert NotModerator();
+        _;
+    }
+
+    /// @notice Grant or revoke identity moderation rights.
+    function setModerator(address account, bool allowed) external onlyOwner {
+        if (account == address(0)) revert NotModerator();
+        moderators[account] = allowed;
+        emit ModeratorUpdated(account, allowed);
+    }
+
+    function verify(uint256 tokenId, bool status) external onlyOwnerOrModerator {
         if (_ownerOf(tokenId) == address(0)) revert NonexistentToken();
         profiles[tokenId].verified = status;
         emit ProfileVerified(tokenId, status);
     }
 
-    function setReputationScore(uint256 tokenId, uint256 newScore) external onlyOwner {
+    function setReputationScore(uint256 tokenId, uint256 newScore) external onlyOwnerOrModerator {
         if (_ownerOf(tokenId) == address(0)) revert NonexistentToken();
         if (newScore == 0 || newScore > MAX_REPUTATION_SCORE) revert InvalidReputationScore();
 
@@ -1573,5 +1589,10 @@ contract Series9Identity is
     ///         Mint fees stay staked forever by design; only this balance may be unstaked.
     uint256 public ownerStakedBalance;
 
-    uint256[26] private __gap;
+    /// @notice Accounts the owner has delegated identity moderation to. Moderators may verify
+    ///         identities and set reputation scores; nothing else. Funds, fees, wallet
+    ///         implementations, pausing and upgrades stay with the owner alone.
+    mapping(address => bool) public moderators;
+
+    uint256[25] private __gap;
 }
