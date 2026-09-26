@@ -348,6 +348,21 @@ contract Series9Identity is
     function collectStakingRewards() external whenNotPaused nonReentrant {
         uint256 balanceBefore = IERC20(ser9).balanceOf(address(this));
         ISeries9Staking(stakingContract).claimRewards();
+        _distributeStakingRewards(balanceBefore);
+    }
+
+    /// @dev Distribute pending staking rewards to the CURRENT score set before that set changes (mint,
+    ///      score update). Without this, a new mint or score bump followed by {collectStakingRewards}
+    ///      captures a share of rewards that accrued before it existed. Best-effort: a reverting claim
+    ///      (e.g. staking's NoRewards) must not block the caller.
+    function _checkpointStakingRewards() internal {
+        uint256 balanceBefore = IERC20(ser9).balanceOf(address(this));
+        try ISeries9Staking(stakingContract).claimRewards() {
+            _distributeStakingRewards(balanceBefore);
+        } catch {}
+    }
+
+    function _distributeStakingRewards(uint256 balanceBefore) internal {
         uint256 received = IERC20(ser9).balanceOf(address(this)) - balanceBefore;
 
         if (received > 0) {
@@ -433,6 +448,8 @@ contract Series9Identity is
         if (ownerTokenId[msg.sender] != 0) revert AlreadyHasIdentity(msg.sender);
         if (bytes(name).length > 32) revert NameTooLong();
         if (bytes(bio).length > 128) revert BioTooLong();
+
+        _checkpointStakingRewards();
 
         // Determine fee based on entity type
         uint256 fee = entityType == EntityType.AI ? aiMintFee : humanMintFee;
@@ -752,6 +769,7 @@ contract Series9Identity is
             return;
         }
 
+        _checkpointStakingRewards();
         uint256 totalScore = _ensureTotalReputationScore();
         address tokenOwner = ownerOf(tokenId);
         _accrueNFTReward(tokenOwner);

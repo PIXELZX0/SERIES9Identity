@@ -435,6 +435,28 @@ contract Series9IdentityTest is Test {
         assertEq(ser9.balanceOf(bob), bobBefore + 10 ether);
     }
 
+    function test_lateMintAndScoreBumpCannotSnipeUncollectedRewards() public {
+        vm.prank(alice);
+        uint256 aliceTokenId = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
+
+        // Rewards accrue to alice's era but nobody collects; bob mints right before collecting.
+        _fundIdentityRewards(90 ether);
+        vm.prank(bob);
+        identity.mintIdentity("Bob", "", Series9Identity.EntityType.Human, 100, 200);
+        identity.collectStakingRewards();
+
+        assertEq(identity.pendingNFTRewards(alice), 90 ether);
+        assertEq(identity.pendingNFTRewards(bob), 0);
+
+        // Same for a score change: pre-change rewards settle at the old weights.
+        _fundIdentityRewards(18 ether);
+        identity.setReputationScore(aliceTokenId, 1_000_000);
+        identity.collectStakingRewards();
+
+        assertEq(identity.pendingNFTRewards(alice), 99 ether);
+        assertEq(identity.pendingNFTRewards(bob), 9 ether);
+    }
+
     function test_ownerCanUpdateReputationScoreAndFutureRewardsFollowScoreRatio() public {
         vm.prank(alice);
         uint256 aliceTokenId = identity.mintIdentity("Alice", "", Series9Identity.EntityType.Human, 100, 200);
