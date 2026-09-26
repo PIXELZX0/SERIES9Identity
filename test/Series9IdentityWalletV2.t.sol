@@ -136,9 +136,14 @@ contract Series9IdentityWalletV2Test is Test {
         wallet.upgradeToAndCall(address(v2Impl), "");
     }
 
-    function _sign(uint256 pk, bytes32 hash) internal pure returns (bytes memory) {
+    function _rawSign(uint256 pk, bytes32 hash) internal pure returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, hash);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev Holder signs the wallet-bound replay-safe digest, as a real integration must.
+    function _sign(Series9IdentityWalletV2 wallet, uint256 pk, bytes32 hash) internal view returns (bytes memory) {
+        return _rawSign(pk, wallet.replaySafeHash(hash));
     }
 
     /// @dev Run the full escrow transfer of `tid` to `to`.
@@ -188,20 +193,39 @@ contract Series9IdentityWalletV2Test is Test {
         (, Series9IdentityWalletV2 wallet) = _mintV2(alice);
         bytes32 hash = keccak256("hello series9");
 
-        assertEq(wallet.isValidSignature(hash, _sign(alicePk, hash)), MAGIC);
+        assertEq(wallet.isValidSignature(hash, _sign(wallet, alicePk, hash)), MAGIC);
+    }
+
+    function test_rawHashSignatureCannotBeReplayedOntoWallet() public {
+        (, Series9IdentityWalletV2 wallet) = _mintV2(alice);
+        // e.g. a Permit2 digest alice signed for her EOA: owner is not part of the digest.
+        bytes32 hash = keccak256("permit2 digest signed for alice's EOA");
+
+        assertEq(wallet.isValidSignature(hash, _rawSign(alicePk, hash)), INVALID);
+    }
+
+    function test_signatureBoundToSingleWallet() public {
+        (, Series9IdentityWalletV2 aliceWallet) = _mintV2(alice);
+        (, Series9IdentityWalletV2 carolWallet) = _mintV2(carol);
+        bytes32 hash = keccak256("hello series9");
+
+        assertTrue(aliceWallet.replaySafeHash(hash) != carolWallet.replaySafeHash(hash));
+        // A digest bound to alice's wallet never validates on carol's, even when signed by carol.
+        assertEq(carolWallet.isValidSignature(hash, _sign(aliceWallet, carolPk, hash)), INVALID);
+        assertEq(carolWallet.isValidSignature(hash, _sign(carolWallet, carolPk, hash)), MAGIC);
     }
 
     function test_isValidSignatureFromNonHolder() public {
         (, Series9IdentityWalletV2 wallet) = _mintV2(alice);
         bytes32 hash = keccak256("hello series9");
 
-        assertEq(wallet.isValidSignature(hash, _sign(malloryPk, hash)), INVALID);
+        assertEq(wallet.isValidSignature(hash, _sign(wallet, malloryPk, hash)), INVALID);
     }
 
     function test_isValidSignatureWrongHash() public {
         (, Series9IdentityWalletV2 wallet) = _mintV2(alice);
         bytes32 hash = keccak256("hello series9");
-        bytes memory sig = _sign(alicePk, hash);
+        bytes memory sig = _sign(wallet, alicePk, hash);
 
         assertEq(wallet.isValidSignature(keccak256("other message"), sig), INVALID);
     }
@@ -219,7 +243,7 @@ contract Series9IdentityWalletV2Test is Test {
     function test_isValidSignatureBlockedDuringTransferFreeze() public {
         (uint256 tid, Series9IdentityWalletV2 wallet) = _mintV2(alice);
         bytes32 hash = keccak256("hello series9");
-        bytes memory sig = _sign(alicePk, hash);
+        bytes memory sig = _sign(wallet, alicePk, hash);
 
         assertEq(wallet.isValidSignature(hash, sig), MAGIC);
 
@@ -239,14 +263,14 @@ contract Series9IdentityWalletV2Test is Test {
         _transferIdentity(tid, alice, carol);
 
         // New holder signs; old holder cannot.
-        assertEq(wallet.isValidSignature(hash, _sign(carolPk, hash)), MAGIC);
-        assertEq(wallet.isValidSignature(hash, _sign(alicePk, hash)), INVALID);
+        assertEq(wallet.isValidSignature(hash, _sign(wallet, carolPk, hash)), MAGIC);
+        assertEq(wallet.isValidSignature(hash, _sign(wallet, alicePk, hash)), INVALID);
     }
 
     function test_isValidSignatureCancelledTransferUnfreezes() public {
         (uint256 tid, Series9IdentityWalletV2 wallet) = _mintV2(alice);
         bytes32 hash = keccak256("hello series9");
-        bytes memory sig = _sign(alicePk, hash);
+        bytes memory sig = _sign(wallet, alicePk, hash);
 
         vm.prank(alice);
         identity.initiateIdentityTransfer(carol);
@@ -268,7 +292,7 @@ contract Series9IdentityWalletV2Test is Test {
 
         bytes32 hash = keccak256("nested 1271");
         // The holder contract validates the inner key's signature; the wallet must defer to it.
-        assertEq(wallet.isValidSignature(hash, _sign(innerPk, hash)), MAGIC);
-        assertEq(wallet.isValidSignature(hash, _sign(malloryPk, hash)), INVALID);
+        assertEq(wallet.isValidSignature(hash, _sign(wallet, innerPk, hash)), MAGIC);
+        assertEq(wallet.isValidSignature(hash, _sign(wallet, malloryPk, hash)), INVALID);
     }
 }
