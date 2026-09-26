@@ -35,7 +35,9 @@ import {Series9IdentityWalletV2} from "../src/Series9IdentityWalletV2.sol";
 ///     --rpc-url $MONAD_RPC_URL --broadcast --profile deploy
 contract UpgradeIdentityWalletV2 is Script {
     string constant CHAIN_ID = "143";
-    uint256 constant WALLET_VERSION = 2;
+    // 3, not 2: the original raw-hash ERC-1271 build may already hold version 2. Wallets on it can only move to a
+    // strictly higher version, so the replay-safe build must outrank it. Revoke the old impl with revokeWalletImpl.
+    uint256 constant WALLET_VERSION = 3;
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -54,7 +56,7 @@ contract UpgradeIdentityWalletV2 is Script {
         string memory json = string.concat(
             '{"version":"1.0","chainId":"',
             CHAIN_ID,
-            '","meta":{"name":"Series9 Identity Wallet v2 (ERC-1271)","description":"Allowlist the wallet implementation that adds ERC-1271 isValidSignature as logic version 2; identity holders then upgrade their own wallets"},"transactions":[{"to":"',
+            '","meta":{"name":"Series9 Identity Wallet v2 (ERC-1271)","description":"Allowlist the wallet implementation that adds ERC-1271 isValidSignature (replay-safe, wallet-bound EIP-712 digest) as logic version 3; identity holders then upgrade their own wallets"},"transactions":[{"to":"',
             vm.toString(proxy),
             '","value":"0","data":"',
             vm.toString(approveCalldata),

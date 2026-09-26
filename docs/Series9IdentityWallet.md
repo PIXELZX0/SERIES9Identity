@@ -94,7 +94,7 @@ v2부터 지갑이 **서명자**가 된다. `isValidSignature(bytes32 hash, byte
 ```
 holder = ownerOf(tokenId)                       // 실패(소각 등) → 0xffffffff
 authorizeWalletCall(tokenId, holder)            // revert(freeze 등) → 0xffffffff
-SignatureChecker.isValidSignatureNow(holder, hash, signature)
+SignatureChecker.isValidSignatureNow(holder, replaySafeHash(hash), signature)
     ? 0x1626ba7e : 0xffffffff
 ```
 
@@ -102,8 +102,11 @@ SignatureChecker.isValidSignatureNow(holder, hash, signature)
 - **freeze 중 서명 무효** — 전송(Pending/Accepted) 중에는 `authorizeWalletCall`이 revert하므로 `0xffffffff` 반환. 출금 동결과 동일한 규칙을 재사용(권한 로직 사본 없음).
 - **절대 revert하지 않음** — 모든 실패 경로는 `0xffffffff` 반환.
 - **컨트랙트 보유자 지원** — `SignatureChecker`가 EOA(ECDSA) / 컨트랙트(중첩 ERC-1271) 양쪽을 처리. 다른 스마트 어카운트가 정체성을 보유해도 서명 가능.
-- **raw hash 방식** — dapp이 넘긴 `hash`를 그대로 검증(도메인 래핑 없음). Permit2·마켓플레이스 리스팅·SIWE 등 표준 서명 플로우와 그대로 호환.
-  - ⚠️ 트레이드오프: 한 보유자가 여러 정체성 지갑을 가질 경우, **같은 hash에 대한 서명은 그 보유자의 모든 지갑에서 유효**하다(지갑별 도메인 바인딩 없음). 지갑별 분리가 필요한 프로토콜은 자기 도메인에 `verifyingContract`로 지갑 주소를 넣어 hash 자체를 분리할 것.
+- **replay-safe 래핑** — 보유자는 raw `hash`가 아니라 지갑에 바인딩된 EIP-712 digest에 서명한다:
+  - domain `{name: "Series9IdentityWallet", version: "1", chainId, verifyingContract: <지갑 주소>}`
+  - type `Series9IdentityWalletMessage(bytes32 hash)`
+  - `replaySafeHash(hash)` / `domainSeparator()` view로 온체인 계산 가능. 프론트는 `signTypedData`로 위 타입데이터에 서명.
+  - 이유: raw hash 방식이면 보유자가 **자기 EOA용**으로 한 서명(Permit2처럼 digest에 owner가 없는 것)을 지갑에 그대로 재사용해 지갑 자산 allowance를 만들 수 있다. 래핑으로 지갑·체인별로 분리.
 - v2는 **스토리지를 추가하지 않음** → 보유자가 `upgradeToAndCall(walletV2, "")`로 직접 업그레이드(init data 불필요). 배포·허용목록은 `script/UpgradeIdentityWalletV2.s.sol`이 Safe TX JSON으로 생성.
 
 ## 통합 포인트
