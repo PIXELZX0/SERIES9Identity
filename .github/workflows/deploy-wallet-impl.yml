@@ -1,0 +1,52 @@
+name: Deploy Wallet Logic Upgrade
+
+# Wallet logic upgrades are not covered by the release workflow (the factory is already initialized).
+# This deploys the current Series9IdentityWalletV2 implementation and emits the Safe JSON that allowlists it.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-wallet-impl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MONAD_RPC_URL: ${{ secrets.MONAD_RPC_URL }}
+      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      IDENTITY_PROXY: ${{ secrets.IDENTITY_PROXY }}
+      FOUNDRY_PROFILE: deploy
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Deploy wallet implementation + write Safe JSON
+        run: |
+          forge script script/UpgradeIdentityWalletV2.s.sol:UpgradeIdentityWalletV2 \
+            --rpc-url "$MONAD_RPC_URL" --broadcast
+
+      - name: Verify on Sourcify
+        continue-on-error: true
+        run: |
+          IMPL="$(jq -r '.transactions[0].contractAddress' broadcast/UpgradeIdentityWalletV2.s.sol/143/run-latest.json)"
+          echo "Wallet impl: $IMPL" >> "$GITHUB_STEP_SUMMARY"
+          forge verify-contract "$IMPL" src/Series9IdentityWalletV2.sol:Series9IdentityWalletV2 \
+            --chain 143 --rpc-url "$MONAD_RPC_URL" \
+            --verifier sourcify --verifier-url https://sourcify-api-monad.blockvision.org
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wallet-impl-deploy
+          if-no-files-found: error
+          path: |
+            safe-tx-wallet-v2.json
+            broadcast/UpgradeIdentityWalletV2.s.sol/143/run-latest.json
